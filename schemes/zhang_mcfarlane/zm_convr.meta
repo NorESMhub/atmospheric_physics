@@ -144,6 +144,44 @@
   type = real | kind = kind_phys
   dimensions = ()
   intent = in
+# CAMNOR thermo begin
+[ zmconv_tiedke_lnd ]
+  standard_name = temp_perturbation_over_land_in_zhang_mcfarlane_deep_convection_scheme
+  units = K
+  type = real | kind = kind_phys
+  intent = in
+  dimensions = ()
+[ zmconv_entrmn ]
+  standard_name = maximum_entrainment_rate_for_plume_ensemble_in_zhang_mcfarlane_deep_convection_scheme
+  units = m-1
+  type = real | kind = kind_phys
+  intent = in
+  dimensions = ()
+[ zmconv_alfadet ]
+  standard_name = convective_detrainment/entrainment_ratio_in_zhang_mcfarlane_deep_convection_scheme
+  units = 1
+  type = real | kind = kind_phys
+  intent = in
+  dimensions = ()
+[ zmconv_plclmin ]
+  standard_name = minimum_lcl_pressure_to_allow_convection_in_zhang_mcfarlane_deep_convection_scheme
+  units = hPa
+  type = real | kind = kind_phys
+  intent = in
+  dimensions = ()
+[ zmconv_use_moist_plume_thermo ]
+  standard_name = use_moist_thermodynamics_in_plume_ensemble_in_zhang_mcfarlane_deep_convection_scheme
+  units = flag
+  type = logical
+  intent = in
+  dimensions = ()
+[ zmconv_retrigger ]
+  standard_name = iterate_plume_ensemble_computation_and_trigger_functions_in_zhang_mcfarlane_deep_convection_scheme
+  units = flag
+  type = logical
+  intent = in
+  dimensions = ()
+# CAMNOR thermo end
 [ masterproc ]
   standard_name = flag_for_mpi_root
   units = flag
@@ -440,6 +478,13 @@
   type = real | kind = kind_phys
   dimensions = (horizontal_loop_extent)
   intent = in
+[ eurt ]
+  standard_name = plume_ensemble_entrainment_rate_for_deep_convection
+  long_name = ZM plume ensemble entrainment rate
+  units = 1/m
+  type = real | kind = kind_phys
+  dimensions = (horizontal_loop_extent, vertical_layer_dimension)
+  intent = out
 [ rice ]
   standard_name = vertically_integrated_cloud_ice_tendency_due_to_all_convection_to_be_applied_later_in_time_loop
   units = m s-1
