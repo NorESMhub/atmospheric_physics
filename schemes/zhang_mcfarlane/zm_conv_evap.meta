@@ -203,11 +203,11 @@
   dimensions = ()
   intent = out
 
+# CAMNOR thermo begin
 #########################################################
 [ccpp-arg-table]
   name  = zm_conv_evap_init
   type  = scheme
-# CAMNOR thermo begin
 [ zmconv_use_moist_plume_thermo ]
   standard_name = use_moist_thermodynamics_in_plume_ensemble_in_zhang_mcfarlane_deep_convection_scheme
   units = flag
