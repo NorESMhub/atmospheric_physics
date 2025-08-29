@@ -49,15 +49,16 @@ module zm_convr
    real(kind_phys) :: tiedke_add      ! namelist configurable
    real(kind_phys) :: dmpdz_param     ! namelist configurable
 
+   ! CAMNOR thermo tunable parameters which replace formerly hardcoded values
+   real(kind_phys) :: entrmn  = 2e-4_kind_phys ! maximum convective entrainment rate
+   real(kind_phys) :: alfadet = 0.1_kind_phys  ! convective detrainment/entrainment ratio
+   real(kind_phys) :: plclmin = 6.e2_kind_phys ! don't convect if LCL above this level (p<plclmin [mb])
    ! CAMNOR thermo begin
    real(kind_phys) :: dcol, zv, cpv                   ! used with use_moist_plume_thermo
    ! CAMNOR thermo parameters
    logical         :: retrigger  = .true.             ! iterate parcel-plume calculation and trigger condition
    logical         :: use_moist_plume_thermo = .true. ! latent heat of freezing added in plume ensemble
    real(kind_phys) :: tiedke_lnd = 1.0_kind_phys
-   real(kind_phys) :: entrmn     = 2e-4_kind_phys     ! maximum convective entrainment rate
-   real(kind_phys) :: alfadet = 0.1_kind_phys         ! convective detrainment/entrainment ratio
-   real(kind_phys) :: plclmin    = 6.e2_kind_phys     ! don't convect if LCL above this level (p<plclmin [mb])
    ! switches derived from parameters above
    logical         :: second_call = .false.           ! Iterate CAPE calculation using diagnosed entrnm
    logical         :: camnor_thermo = .false.
