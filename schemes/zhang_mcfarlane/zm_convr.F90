@@ -166,7 +166,7 @@ contains
    ! CAMNOR thermo parameters
    use_moist_plume_thermo = zmconv_use_moist_plume_thermo
    retrigger  = zmconv_retrigger
-   ! new ZM parameters (were hardcoded values)
+   ! previously hardcoded values
    entrmn     = zmconv_entrmn
    alfadet    = zmconv_alfadet
    plclmin    = zmconv_plclmin
@@ -915,7 +915,7 @@ subroutine zm_convr_run(     ncol    ,pver    ,                         &
                   evpg    ,cug     ,rprdg   ,limcnv  ,landfracg , &
                   qldeg    ,qhat    )
 
-   end if ! end second_call=F
+   end if ! end second_call
    !===================================================================================
    ! CAMNOR thermo end
 
@@ -1469,8 +1469,8 @@ end if ! Mixed parcel properties
    return
 end subroutine buoyan_dilute
 
-subroutine parcel_dilute (ncol, pver, cpliq, cpwv, rh2o, latice, msg, klaunch, p, t, q, & !tht
-  tpert, tp, tpv, qstp, pl, tl, ql, lcl, & !tht
+subroutine parcel_dilute (ncol, pver, cpliq, cpwv, rh2o, latice, msg, klaunch, p, t, q, &
+  tpert, tp, tpv, qstp, pl, tl, ql, lcl, &
   landfrac,lat,long,errmsg,errflg, &
   ! CAMNOR thermo begin
   z, zl, dmpdz &
@@ -1732,7 +1732,7 @@ do k = pver, msg+1, -1
                           long(i),errmsg,errflg)
             ! CAMNOR thermo begin
          end if
-         ! CAMNOR thermo begin
+         ! CAMNOR thermo end
 
 ! Determine if this is lcl of this column if qsmix <= qtmix.
 ! FIRST LEVEL where this happens on ascending.
@@ -2695,6 +2695,16 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end do
       end do
 
+      ! CAMNOR thermo begin (moist thermo, initialize tu)
+      if (camnor_thermo) then
+         do k = pver,msg + 2,-1
+            do i = 1,il2g
+               tu(i,k) = (hu(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qu(i,k)) &
+                    /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qu(i,k) ))
+            end do
+         end do
+      end if
+      ! CAMNOR thermo end
       do i = 1,il2g
          done(i) = .false.
       end do
@@ -2714,10 +2724,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                   su(i,k) = (hu(i,k)-rl*qu(i,k))/cp
                   ! CAMNOR thermo begin
                end if
-            else
                ! CAMNOR thermo end
-               tu(i,k) = (hu(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qu(i,k)) &
-                                /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qu(i,k) ))
             end if
             if (( .not. done(i) .and. k > jt(i) .and. k < jb(i)) .and. eps0(i) > 0._kind_phys) then
                su(i,k) = mu(i,k+1)/mu(i,k)*su(i,k+1) + &
@@ -2771,7 +2778,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       do k = pver,msg + 2,-1
          do i = 1,il2g
              if (k >= jt(i) .and. k < tmplel(i) .and. eps0(i) > 0._kind_phys) then
-!+tht moist thermo
                cu(i,k) = ((mu(i,k)*su(i,k)-mu(i,k+1)*su(i,k+1))/ &
                          dz(i,k)- (eu(i,k)-du(i,k))*s(i,k))/(rl/cp)
                ! CAMNOR thermo begin
@@ -2874,10 +2880,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                     /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qds(i,k) ))
                qds(i,k) = qsthat(i,k) + gamhat(i,k)*(hd(i,k)-hsthat(i,k))/ &
                     ((1._kind_phys-dcol*(td(i,k)-tfreez))*rl*(1._kind_phys + gamhat(i,k)))
-            else
-               ! CAMNOR thermo end
-               sd(i,jd(i)) = (hd(i,jd(i)) - rl*qd(i,jd(i)))/cp
-               ! CAMNOR thermo begin
             end if
             ! CAMNOR thermo end
          end if
@@ -2923,6 +2925,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    do i = 1,il2g
       totevp(i) = totevp(i) + md(i,jd(i))*qd(i,jd(i)) - md(i,jb(i))*qd(i,jb(i))
    end do
+!!$   if (.true.) then
    if (.false.) then
       do i = 1,il2g
          k = jb(i)
