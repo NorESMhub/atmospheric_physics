@@ -1,6 +1,9 @@
 module zm_convr
 
   use ccpp_kinds, only:  kind_phys
+  ! CAMNOR thermo begin
+  use physconst,  only: cpvir, zvir
+  ! CAMNOR thermo end
 
   implicit none
 
@@ -46,6 +49,21 @@ module zm_convr
    real(kind_phys) :: tiedke_add      ! namelist configurable
    real(kind_phys) :: dmpdz_param     ! namelist configurable
 
+   ! CAMNOR thermo tunable parameters which replace formerly hardcoded values
+   real(kind_phys) :: entrmn  = 2e-4_kind_phys ! maximum convective entrainment rate
+   real(kind_phys) :: alfadet = 0.1_kind_phys  ! convective detrainment/entrainment ratio
+   real(kind_phys) :: plclmin = 6.e2_kind_phys ! don't convect if LCL above this level (p<plclmin [mb])
+   ! CAMNOR thermo begin
+   real(kind_phys) :: dcol, zv, cpv                   ! used with use_moist_plume_thermo
+   ! CAMNOR thermo parameters
+   logical         :: retrigger  = .true.             ! iterate parcel-plume calculation and trigger condition
+   logical         :: use_moist_plume_thermo = .true. ! latent heat of freezing added in plume ensemble
+   real(kind_phys) :: tiedke_lnd = 1.0_kind_phys
+   ! switches derived from parameters above
+   logical         :: second_call = .false.           ! Iterate CAPE calculation using diagnosed entrnm
+   logical         :: camnor_thermo = .false.
+   ! CAMNOR thermo end
+
 contains
 
 
@@ -54,17 +72,33 @@ contains
 !> \section arg_table_zm_convr_init Argument Table
 !! \htmlinclude zm_convr_init.html
 !!
-subroutine zm_convr_init(plev, plevp, cpair, epsilo, gravit, latvap, tmelt, rair, &
-                    pref_edge, zmconv_c0_lnd, zmconv_c0_ocn, zmconv_ke, zmconv_ke_lnd, &
-                    zmconv_momcu, zmconv_momcd, zmconv_num_cin, &
-                    no_deep_pbl_in, zmconv_tiedke_add, &
-                    zmconv_capelmt, zmconv_dmpdz, zmconv_parcel_pbl, zmconv_parcel_hscale, zmconv_tau, &
-                    masterproc, iulog, errmsg, errflg)
+   subroutine zm_convr_init(plev, plevp, cpair,                                            &
+        ! CAMNOR thermo begin
+        cpliq, cpwv,                                                                       &
+        ! CAMNOR thermo end
+        epsilo, gravit, latvap, tmelt, rair,                                               &
+        pref_edge, zmconv_c0_lnd, zmconv_c0_ocn, zmconv_ke, zmconv_ke_lnd,                 &
+        zmconv_momcu, zmconv_momcd, zmconv_num_cin,                                        &
+        no_deep_pbl_in, zmconv_tiedke_add,                                                 &
+        ! CAMNOR thermo begin
+        zmconv_tiedke_lnd,                                                                 &
+        zmconv_entrmn,                                                                     &
+        zmconv_alfadet,                                                                    &
+        zmconv_plclmin,                                                                    &
+        zmconv_use_moist_plume_thermo,                                                     &
+        zmconv_retrigger,                                                                  &
+        ! CAMNOR thermo end
+        zmconv_capelmt, zmconv_dmpdz, zmconv_parcel_pbl, zmconv_parcel_hscale, zmconv_tau, &
+        masterproc, iulog, errmsg, errflg)
 
    integer, intent(in)   :: plev
    integer, intent(in)   :: plevp
 
    real(kind_phys), intent(in)   :: cpair           ! specific heat of dry air (J K-1 kg-1)
+   ! CAMNOR thermo begin
+   real(kind_phys), intent(in)   :: cpliq           ! specific heat of fresh h2o (J K-1 kg-1)
+   real(kind_phys), intent(in)   :: cpwv            ! specific heat of water vapor (J K-1 kg-1)
+   ! CAMNOR thermo end
    real(kind_phys), intent(in)   :: epsilo          ! ratio of h2o to dry air molecular weights
    real(kind_phys), intent(in)   :: gravit          ! gravitational acceleration (m s-2)
    real(kind_phys), intent(in)   :: latvap          ! Latent heat of vaporization (J kg-1)
@@ -79,13 +113,21 @@ subroutine zm_convr_init(plev, plevp, cpair, epsilo, gravit, latvap, tmelt, rair
    real(kind_phys),intent(in)           :: zmconv_ke_lnd
    real(kind_phys),intent(in)           :: zmconv_momcu
    real(kind_phys),intent(in)           :: zmconv_momcd
-   logical, intent(in)           :: no_deep_pbl_in  ! no_deep_pbl = .true. eliminates ZM convection entirely within PBL
+   logical        ,intent(in)           :: no_deep_pbl_in  ! no_deep_pbl = .true. eliminates ZM convection entirely within PBL
    real(kind_phys),intent(in)           :: zmconv_tiedke_add
    real(kind_phys),intent(in)           :: zmconv_capelmt
    real(kind_phys),intent(in)           :: zmconv_dmpdz
-   logical, intent(in)                  :: zmconv_parcel_pbl ! Should the parcel properties include PBL mixing?
+   logical        ,intent(in)           :: zmconv_parcel_pbl ! Should the parcel properties include PBL mixing?
    real(kind_phys),intent(in)           :: zmconv_parcel_hscale ! Fraction of PBL over which to mix ZM parcel.
    real(kind_phys),intent(in)           :: zmconv_tau
+   ! CAMNOR thermo begin
+   real(kind_phys),intent(in)           :: zmconv_tiedke_lnd
+   real(kind_phys),intent(in)           :: zmconv_entrmn
+   real(kind_phys),intent(in)           :: zmconv_alfadet
+   real(kind_phys),intent(in)           :: zmconv_plclmin
+   logical        ,intent(in)           :: zmconv_use_moist_plume_thermo
+   logical        ,intent(in)           :: zmconv_retrigger
+   ! CAMNOR thermo end
    logical, intent(in)                  :: masterproc
    integer, intent(in)                  :: iulog
    character(len=512), intent(out)      :: errmsg
@@ -120,6 +162,34 @@ subroutine zm_convr_init(plev, plevp, cpair, epsilo, gravit, latvap, tmelt, rair
    no_deep_pbl = no_deep_pbl_in
    lparcel_pbl = zmconv_parcel_pbl
    parcel_hscale = zmconv_parcel_hscale
+   ! CAMNOR thermo begin
+   ! CAMNOR thermo parameters
+   use_moist_plume_thermo = zmconv_use_moist_plume_thermo
+   retrigger  = zmconv_retrigger
+   ! previously hardcoded values
+   entrmn     = zmconv_entrmn
+   alfadet    = zmconv_alfadet
+   plclmin    = zmconv_plclmin
+   ! Derived switches
+   second_call = retrigger
+   camnor_thermo = (retrigger .or. use_moist_plume_thermo)
+   ! set tiedke_lnd but ensure regression to standard ZM
+   if(camnor_thermo) then
+      tiedke_lnd = zmconv_tiedke_lnd
+   else
+      tiedke_lnd = tiedke_add
+   end if
+   ! auxiliary vars
+   if(use_moist_plume_thermo) then
+      dcol = (cpliq-cpwv) / latvap
+      zv = zvir
+      cpv = cpvir
+   else
+      dcol = 0._kind_phys
+      zv = 0._kind_phys
+      cpv = 0._kind_phys
+   end if
+   ! CAMNOR thermo end
 
    tau = zmconv_tau
 
@@ -127,25 +197,57 @@ subroutine zm_convr_init(plev, plevp, cpair, epsilo, gravit, latvap, tmelt, rair
    ! Limit deep convection to regions below 40 mb
    ! Note this calculation is repeated in the shallow convection interface
    !
-   limcnv = 0   ! null value to check against below
-   if (pref_edge(1) >= 4.e3_kind_phys) then
-      limcnv = 1
-   else
-      do k=1,plev
-         if (pref_edge(k) < 4.e3_kind_phys .and. pref_edge(k+1) >= 4.e3_kind_phys) then
-            limcnv = k
-            exit
-         end if
-      end do
-      if ( limcnv == 0 ) limcnv = plevp
-   end if
+    limcnv = 0   ! null value to check against below
+    if (pref_edge(1) >= 4.e3_kind_phys) then
+       limcnv = 1
+    else
+       do k=1,plev
+          if (pref_edge(k) < 4.e3_kind_phys .and. pref_edge(k+1) >= 4.e3_kind_phys) then
+             limcnv = k
+             exit
+          end if
+       end do
+       if ( limcnv == 0 ) limcnv = plevp
+    end if
 
-   if ( masterproc ) then
-      write(iulog,*)'ZM_CONV_INIT: Deep convection will be capped at intfc ',limcnv, &
-                    ' which is ',pref_edge(limcnv),' pascals'
-   endif
-
-   if (masterproc) write(iulog,*)'**** ZM: DILUTE Buoyancy Calculation ****'
+    if ( masterproc ) then
+      write(iulog,*) 'ZM_CONVR_INIT'
+      ! CAMNOR thermo begin
+      write(iulog,*) 'Standard ZM tuning parameters:'
+      write(iulog,*) '    zm_convr_init: zmconv_tau = ', tau
+      write(iulog,*) '    zm_convr_init: zmconv_c0_lnd = ', c0_lnd
+      write(iulog,*) '    zm_convr_init: zmconv_c0_ocn = ', c0_ocn
+      write(iulog,*) '    zm_convr_init: zmconv_num_cin:', num_cin
+      write(iulog,*) '    zm_convr_init: zmconv_ke = ', ke
+      write(iulog,*) '    zm_convr_init: zmconv_ke_lnd = ', ke_lnd
+      write(iulog,*) '    zm_convr_init: zmconv_momcu = ', momcu
+      write(iulog,*) '    zm_convr_init: zmconv_momcd = ', momcd
+      write(iulog,*) '    zm_convr_init: no_deep_pbl = ', no_deep_pbl
+      write(iulog,*) '    zm_convr_init: zmconv_capelmt = ', capelmt
+      write(iulog,*) '    zm_convr_init: zmconv_tiedke_add = ', tiedke_add
+      write(iulog,*) '    zm_convr_init: zmconv_parcel_pbl = ', lparcel_pbl
+      write(iulog,*) '    zm_convr_init: zmconv_parcel_hscale = ', parcel_hscale
+      write(iulog,*) '    zm_convr_init: Minimum pressure of LCL allowed: zmconv_plclmin = ', plclmin
+      write(iulog,*) '    zm_convr_init: Maximum entrainment rate in convective ensemble: zmconv_entrmn = ', entrmn
+      write(iulog,*) '    zm_convr_init: Detrainment/entrainment ratio in convect. ens.: zmconv_alfadet = ', alfadet
+      if (.not. camnor_thermo) then
+         write(iulog,*) '    zm_convr_init: Tiedke parameter over land : zmconv_tiedke_lnd = ', tiedke_lnd
+         write(iulog,*)'     zm_convr_init: zmconv_dmpdz', dmpdz_param
+      end if
+      write(iulog,*) 'CAMnor thermo algorithmic settings:'
+      write(iulog,*) '    Conservatively mix plume enthalpy not entropy  : camnor_thermo = ',camnor_thermo
+      write(iulog,*) '    Account for freezing in plume-ensemble buoyancy: zmconv_use_moist_plume_thermo = ', &
+           use_moist_plume_thermo
+      write(iulog,*) '    Iterate CAPE calculation using diagnosed entrnm: ', second_call
+      write(iulog,*) '    Retrigger ZM convection using diagnosed entrnm: ',retrigger
+      if (camnor_thermo) then
+         write(iulog,*)'    Entrainment rate in initial test plume for CAPE, -dmpdz_param = ', -dmpdz_param
+      end if
+      write(iulog,*)'Derived parameter:'
+      write(iulog,*) '   Convection capping: level = ', limcnv ,' at ', pref_edge(limcnv)/100._kind_phys,' hPa'
+      write(iulog,*)'**** ZM: DILUTE Buoyancy Calculation ****'
+      ! CAMNOR thermo end
+    end if
 
 end subroutine zm_convr_init
 
@@ -154,17 +256,20 @@ end subroutine zm_convr_init
 !> \section arg_table_zm_convr_run Argument Table
 !! \htmlinclude zm_convr_run.html
 !!
-subroutine zm_convr_run(     ncol    ,pver    , &
+subroutine zm_convr_run(     ncol    ,pver    ,                         &
                     pverp,   gravit  ,latice  ,cpwv    ,cpliq   , rh2o, &
-                    lat,     long, &
-                    t       ,qh      ,prec    , &
-                    pblh    ,zm      ,geos    ,zi      ,qtnd    , &
-                    heat    ,pap     ,paph    ,dpp     , &
-                    delt    ,mcon    ,cme     ,cape    , &
-                    tpert   ,dlf     ,dif     ,zdu     ,rprd    , &
-                    mu      ,md      ,du      ,eu      ,ed      , &
-                    dp      ,dsubcld ,jt      ,maxg    ,ideep   , &
-                    ql      ,rliq    ,landfrac,                   &
+                    lat,     long,                                      &
+                    t       ,qh      ,prec    ,                         &
+                    pblh    ,zm      ,geos    ,zi      ,qtnd    ,       &
+                    heat    ,pap     ,paph    ,dpp     ,                &
+                    delt    ,mcon    ,cme     ,cape    ,                &
+                    tpert   ,dlf     ,dif     ,zdu     ,rprd    ,       &
+                    mu      ,md      ,du      ,eu      ,ed      ,       &
+                    dp      ,dsubcld ,jt      ,maxg    ,ideep   ,       &
+                    ql      ,rliq    ,landfrac,                         &
+                    ! CAMNOR thermo begin
+                    eurt    ,                                           &
+                    ! CAMNOR thermo end
                     rice    ,lengath ,scheme_name, errmsg  ,errflg)
 !-----------------------------------------------------------------------
 !
@@ -319,6 +424,9 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 ! transports can be done in outside of conv_cam.
    real(kind_phys), intent(out) :: mu(:,:)  !                                                                 (ncol,pver)
    real(kind_phys), intent(out) :: eu(:,:)  !                                                                 (ncol,pver)
+   ! CAMNOR thermo begin
+   real(kind_phys), intent(out) :: eurt(:,:)!                                                                 (ncol,pver)
+   ! CAMNOR thermo end
    real(kind_phys), intent(out) :: du(:,:)  !                                                                 (ncol,pver)
    real(kind_phys), intent(out) :: md(:,:)  !                                                                 (ncol,pver)
    real(kind_phys), intent(out) :: ed(:,:)  !                                                                 (ncol,pver)
@@ -353,14 +461,8 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    real(kind_phys) dptot(ncol)
 
    real(kind_phys) mumax(ncol)
-
-!
    real(kind_phys) pblt(ncol)           ! i row of pbl top indices.
 
-
-
-
-!
 !-----------------------------------------------------------------------
 !
 ! general work fields (local variables):
@@ -404,6 +506,7 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 
    integer lclg(ncol)       ! wg gathered values of lcl.
    integer lelg(ncol)
+
 !
 ! work fields arising from gathered calculations.
 !
@@ -422,6 +525,12 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    real(kind_phys) qlg(ncol,pver)
    real(kind_phys) dudt(ncol,pver)           ! wg u-wind tendency at gathered points.
    real(kind_phys) dvdt(ncol,pver)           ! wg v-wind tendency at gathered points.
+
+   ! CAMNOR thermo begin
+   integer         :: indxd(ncol)      ! work array
+   real(kind_phys) :: dmpdz(ncol,pver) ! Parcel fractional mass entrainment rate (/m)
+   real(kind_phys) :: hk, dmsm(ncol)   ! for diagnostic entrainment
+   ! CAMNOR thermo end
 
    real(kind_phys) qldeg(ncol,pver)        ! cloud liquid water mixing ratio for detrainment (kg/kg)
    real(kind_phys) mb(ncol)                ! wg cloud base mass flux.
@@ -459,8 +568,10 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 !
 ! initialize necessary arrays.
 ! zero out variables not used in cam
-!
 
+   ! CAMNOR thermo begin
+   dmpdz(:,:) = dmpdz_param ! initialise value for entrainment rate
+   ! CAMNOR thermo end
 
    qtnd(:,:) = 0._kind_phys
    heat(:,:) = 0._kind_phys
@@ -486,18 +597,17 @@ subroutine zm_convr_run(     ncol    ,pver    , &
          dlf(i,k)   = 0._kind_phys
          dlg(i,k)   = 0._kind_phys
          qldeg(i,k) = 0._kind_phys
-
+         ! CAMNOR thermo begin
+         eurt(i,k)  = 0._kind_phys ! plume ensemble entrainment rate
+         ! CAMNOR thermo end
          dif(i,k)   = 0._kind_phys
-
       end do
    end do
 
    do i = 1,ncol
       pblt(i) = pver
       dsubcld(i) = 0._kind_phys
-
    end do
-
 
 !
 ! calculate local pressure (mbs) and height (m) for both interface
@@ -516,7 +626,7 @@ subroutine zm_convr_run(     ncol    ,pver    , &
          zf(i,k) = zi(i,k) + zs(i)
       end do
    end do
-!
+
    do k = pver - 1,msg + 1,-1
       do i = 1,ncol
          if (abs(z(i,k)-zs(i)-pblh(i)) < (zf(i,k)-zf(i,k+1))*0.5_kind_phys) pblt(i) = k
@@ -530,7 +640,15 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    do k = 1,pver
       do i = 1,ncol
          q(i,k) = qh(i,k)
-         s(i,k) = t(i,k) + (grav/cpres)*z(i,k)
+         ! CAMNOR thermo begin (moist thermo)
+         if (camnor_thermo) then
+            s(i,k) = t(i,k) + (grav/((1._kind_phys+(zv*q(i,k)))*cpres))*z(i,k)
+         else
+            ! CAMNOR thermo end
+            s(i,k) = t(i,k) + (grav/cpres)*z(i,k)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
          tp(i,k)=0.0_kind_phys
          shat(i,k) = s(i,k)
          qhat(i,k) = q(i,k)
@@ -550,14 +668,17 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    !  Evaluate Tparcel, qs(Tparcel), buoyancy and CAPE,
    !     lcl, lel, parcel launch level at index maxi()=hmax
 
-   call buoyan_dilute(  ncol   ,pver     , &
-               cpliq   ,latice  ,cpwv    ,rh2o    ,&
-               q       ,t       ,p       ,z       ,pf       , &
-               tp      ,qstp    ,tl      ,rl      ,cape     , &
-               pblt    ,lcl     ,lel     ,lon     ,maxi     , &
-               rgas    ,grav    ,cpres   ,msg     , &
-               zi      ,zs      ,tpert   , landfrac,&
-               lat     ,long    ,errmsg  ,errflg)
+   call buoyan_dilute(ncol   ,pver   , &
+               cpliq ,latice ,cpwv   ,rh2o    ,&
+               q     ,t      ,p      ,z       ,pf   , &
+               tp    ,qstp   ,tl     ,rl      ,cape , &
+               pblt  ,lcl    ,lel    ,lon     ,maxi , &
+               rgas  ,grav   ,cpres  ,msg     , &
+               zi    ,zs     ,tpert  ,landfrac, &
+               ! CAMNOR thermo begin
+               dmpdz,                           &
+               ! CAMNOR thermo end
+               lat   ,long   ,errmsg ,errflg)
 
 !
 ! determine whether grid points will undergo some deep convection
@@ -565,7 +686,7 @@ subroutine zm_convr_run(     ncol    ,pver    , &
 ! (require cape.gt. 0 and lel<lcl as minimum conditions).
 !
    lengath = 0
-   ideep   = 0
+   ideep(:)= 0
    do i=1,ncol
       if (cape(i) > capelmt) then
          lengath = lengath + 1
@@ -658,6 +779,153 @@ subroutine zm_convr_run(     ncol    ,pver    , &
                evpg    ,cug     ,rprdg   ,limcnv  ,landfracg , &
                qldeg    ,qhat    )
 
+   ! CAMNOR thermo begin
+   !===================================================================================
+   !! second call to buoyan_dilute for new CAPE using entrainment rate from CLDPRP
+   if (second_call) then
+      do i = 1, lengath
+         hk=0._kind_phys
+         dmpdz(ideep(i),:) = 1._kind_phys ! large value 3D
+         dmsm(i)=0._kind_phys
+         do k = pver, msg+1, -1
+            if (eu(i,k) > 0_kind_phys) then
+               dmsm(i) = dmsm(i) - eu(i,k)
+               hk = hk + 1._kind_phys
+            end if
+         end do
+         if (hk > 0) then
+            dmsm(i) = dmsm(i)/hk
+            dmpdz(ideep(i),:) = dmsm(i)
+         end if
+      end do
+
+      call buoyan_dilute(ncol   ,pver   , &
+           cpliq ,latice ,cpwv   ,rh2o    ,&
+           q     ,t      ,p      ,z       ,pf   , &
+           tp    ,qstp   ,tl     ,rl      ,cape , &
+           pblt  ,lcl    ,lel    ,lon     ,maxi , &
+           rgas  ,grav   ,cpres  ,msg     , &
+           zi    ,zs     ,tpert  ,landfrac, &
+           dmpdz,                           &
+           lat   ,long   ,errmsg ,errflg)
+
+      !-------------------------------------------------------------------------------
+      ! retrigger?
+      if (retrigger) then
+         lengath = 0
+         ideep(:) = 0
+         indxd(:) = 0
+         do i = 1, ncol
+            if (cape(i) > capelmt) then
+               lengath = lengath + 1
+               indxd(lengath) = i ! sub-index
+            end if
+         end do
+         if (lengath == 0) return
+         do ii = 1, lengath
+            i = indxd(ii)
+            ideep(ii) = i ! keeping ideep and indxd distinguished for possible different use of CIN
+         end do
+         !----
+         ! shorten all gathered arrays to new triggered subset
+         do k = 1, pver
+            do i = 1, lengath
+               dp(i,k) = 0.01_kind_phys*dpp(ideep(i),k)
+               qg(i,k) = q(ideep(i),k)
+               tg(i,k) = t(ideep(i),k)
+               pg(i,k) = p(ideep(i),k)
+               zg(i,k) = z(ideep(i),k)
+               sg(i,k) = s(ideep(i),k)
+               tpg(i,k) = tp(ideep(i),k)
+               zfg(i,k) = zf(ideep(i),k)
+               qstpg(i,k) = qstp(ideep(i),k)
+               ug(i,k) = 0._kind_phys
+               vg(i,k) = 0._kind_phys
+            end do
+         end do
+         do i = 1, lengath
+            zfg(i,pver+1) = zf(ideep(i),pver+1)
+         end do
+         do i = 1, lengath
+            capeg(i) = cape(ideep(i))
+            lclg(i) = lcl(ideep(i))
+            lelg(i) = lel(ideep(i))
+            maxg(i) = maxi(ideep(i))
+            tlg(i) = tl(ideep(i))
+            landfracg(i) = landfrac(ideep(i))
+            dsubcld(i) = 0._kind_phys
+         end do
+         do k = msg + 1, pver
+            do i = 1, lengath
+               if (k >= maxg(i)) then
+                  dsubcld(i) = dsubcld(i) + dp(i,k)
+               end if
+            end do
+         end do
+         do k = msg + 2,pver
+            do i = 1, lengath
+               sdifr = 0._kind_phys
+               qdifr = 0._kind_phys
+               if (sg(i,k) > 0._kind_phys .or. sg(i,k-1) > 0._kind_phys) &
+                    sdifr = abs((sg(i,k)-sg(i,k-1))/max(sg(i,k-1),sg(i,k)))
+               if (qg(i,k) > 0._kind_phys .or. qg(i,k-1) > 0._kind_phys) &
+                    qdifr = abs((qg(i,k)-qg(i,k-1))/max(qg(i,k-1),qg(i,k)))
+               if (sdifr > 1.E-6_kind_phys) then
+                  shat(i,k) = log(sg(i,k-1)/sg(i,k))*sg(i,k-1)*sg(i,k)/(sg(i,k-1)-sg(i,k))
+               else
+                  shat(i,k) = 0.5_kind_phys* (sg(i,k)+sg(i,k-1))
+               end if
+               if (qdifr > 1.E-6_kind_phys) then
+                  qhat(i,k) = log(qg(i,k-1)/qg(i,k))*qg(i,k-1)*qg(i,k)/(qg(i,k-1)-qg(i,k))
+               else
+                  qhat(i,k) = 0.5_kind_phys* (qg(i,k)+qg(i,k-1))
+               end if
+            end do
+         end do
+         ! end shorten all gathered arrays to new triggered subset
+         !----
+      else  ! end retrigger=T
+         do k = 1, pver
+            do i = 1, lengath
+               tpg(i,k) = tp(ideep(i),k)
+               zfg(i,k) = zf(ideep(i),k)
+               qstpg(i,k) = qstp(ideep(i),k)
+            end do
+         end do
+         do i = 1, lengath
+            capeg(i) = cape(ideep(i))
+            lclg(i) = lcl(ideep(i))
+            lelg(i) = lel(ideep(i))
+            maxg(i) = maxi(ideep(i))
+            tlg(i) = tl(ideep(i))
+         end do
+      end if ! end retrigger=F
+      !-------------------------------------------------------------------------------
+
+      call cldprp(ncol   ,pver    ,pverp   ,cpliq  , &
+                  latice  ,cpwv    ,rh2o    ,&
+                  qg      ,tg      ,ug      ,vg      ,pg      , &
+                  zg      ,sg      ,mu      ,eu      ,du      , &
+                  md      ,ed      ,sd      ,qd      ,mc      , &
+                  qu      ,su      ,zfg     ,qs      ,hmn     , &
+                  hsat    ,shat    ,qlg     , &
+                  cmeg    ,maxg    ,lelg    ,jt      ,jlcl    , &
+                  maxg    ,j0      ,jd      ,rl      ,lengath , &
+                  rgas    ,grav    ,cpres   ,msg     , &
+                  evpg    ,cug     ,rprdg   ,limcnv  ,landfracg , &
+                  qldeg    ,qhat    )
+
+   end if ! end second_call
+   !===================================================================================
+   ! CAMNOR thermo end
+
+   ! CAMNOR thermo begin
+   do k = msg + 1, pver
+      do i = 1, lengath
+         eurt (ideep(i),k) = -dmpdz(ideep(i),k) ! entr.rate 3D
+      end do
+   end do
+   ! CAMNOR thermo end
 
 !
 ! convert detrainment from units of "1/m" to "1/mb".
@@ -788,9 +1056,6 @@ subroutine zm_convr_run(     ncol    ,pver    , &
    return
 end subroutine zm_convr_run
 
-subroutine zm_convr_finalize
-end subroutine zm_convr_finalize
-
 !=========================================================================================
 
 subroutine buoyan_dilute(  ncol   ,pver    , &
@@ -799,7 +1064,10 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
                   tp      ,qstp    ,tl      ,rl      ,cape    , &
                   pblt    ,lcl     ,lel     ,lon     ,mx      , &
                   rd      ,grav    ,cp      ,msg     , &
-                  zi      ,zs      ,tpert    , landfrac,&
+                  zi      ,zs      ,tpert   ,landfrac, &
+                  ! CAMNOR thermo begin
+                  dmpdz   ,                            &
+                  ! CAMNOR thermo end
                   lat     ,long    ,errmsg  ,errflg)
 !-----------------------------------------------------------------------
 !
@@ -845,6 +1113,9 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
    real(kind_phys), intent(in) :: pf(ncol,pver+1)     ! pressure at interfaces
    real(kind_phys), intent(in) :: pblt(ncol)          ! index of pbl depth
    real(kind_phys), intent(in) :: tpert(ncol)         ! perturbation temperature by pbl processes
+   ! CAMNOR thermo begin
+   real(kind_phys), intent(inout) :: dmpdz(ncol,pver) ! fractional mass entrainment rate (m-1)
+   ! CAMNOR thermo end
 
 ! Use z interface/surface relative values for PBL parcel calculations.
    real(kind_phys), intent(in) :: zi(ncol,pver+1)
@@ -891,9 +1162,6 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
    integer knt(ncol)
    integer lelten(ncol,5)
 
-
-
-
 ! Parcel property variables
 
   real(kind_phys)           :: hmn_lev(ncol,pver)  ! Vertical profile of moist static energy for each column
@@ -910,10 +1178,10 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
   real(kind_phys)           :: hpar(ncol)          ! Initial MSE of the parcel
   real(kind_phys)           :: qpar(ncol)          ! Initial humidity of the parcel
   real(kind_phys)           :: ql(ncol)          ! Initial parcel humidity (for ientropy routine)
+  ! CAMNOR thermo begin
+  real(kind_phys)           :: zl(ncol)          ! Initial parcel GPH (for ienthalpy routine)
+  ! CAMNOR thermo end
   integer            :: ipar ! Index for top of parcel mixing/launch level.
-
-
-
 
    real(kind_phys) cp
    real(kind_phys) e
@@ -927,7 +1195,6 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
    real(kind_phys) rd
    real(kind_phys) rl
 
-!
 !-----------------------------------------------------------------------
 !
    do n = 1,5
@@ -936,9 +1203,24 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
          capeten(i,n) = 0._kind_phys
       end do
    end do
-!
+
    do i = 1,ncol
-      lon(i) = pver
+      ! CAMNOR thermo begin
+      ! THT: N.B.: With the new test parcel calculation that includes
+      !            parcel kinetic energy, the use of PBLT-dependent
+      !            launch level and of CIN may be re-assessed
+      if (camnor_thermo) then
+         if (lparcel_pbl) then
+            lon(i) = pver ! re-assess
+         else
+            lon(i) = min(pver, nint(pblt(i))+2)
+         end if
+      else
+         ! CAMNOR thermo end
+         lon(i) = pver
+         ! CAMNOR thermo begin
+      end if
+      ! CAMNOR thermo end
       knt(i) = 0
       lel(i) = pver
       mx(i) = lon(i)
@@ -958,11 +1240,17 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
    qstp(:ncol,:) = q(:ncol,:)
    hmn_lev(:ncol,:) = 0._kind_phys
 
-
-
 !!! Initialize tv and buoy for output.
 !!! tv=tv : tpv=tpv : qstp=q : buoy=0.
-   tv(:ncol,:) = t(:ncol,:) *(1._kind_phys+1.608_kind_phys*q(:ncol,:))/ (1._kind_phys+q(:ncol,:))
+   ! CAMNOR thermo begin
+   if (camnor_thermo) then ! use system constants
+      tv(:ncol,:) = t(:ncol,:) *(1._kind_phys+q(:ncol,:)/eps1)           / (1._kind_phys+q(:ncol,:))
+   else
+      ! CAMNOR thermo end
+      tv(:ncol,:) = t(:ncol,:) *(1._kind_phys+1.608_kind_phys*q(:ncol,:))/ (1._kind_phys+q(:ncol,:))
+      ! CAMNOR thermo begin
+   end if
+   ! CAMNOR thermo end
    tpv(:ncol,:) = tv(:ncol,:)
    buoy(:ncol,:) = 0._kind_phys
 
@@ -978,11 +1266,20 @@ subroutine buoyan_dilute(  ncol   ,pver    , &
 if (lparcel_pbl) then
 
 ! Vertical profile of MSE and pressure weighted of the same.
-   hmn_lev(:ncol,1:pver) = cp*t(:ncol,1:pver) + grav*z(:ncol,1:pver) + rl*q(:ncol,1:pver)
+   ! CAMNOR thermo begin
+   if(use_moist_plume_thermo) then
+      hmn_lev(:ncol,1:pver) =(cp+q(:ncol,1:pver)*cpliq)*t(:ncol,1:pver)/(1._kind_phys+q(:ncol,1:pver)) &
+           +(1._kind_phys+q(:ncol,1:pver)/eps1)/(1._kind_phys+q(:ncol,1:pver))*grav*z(:ncol,1:pver) &
+           +(rl-(cpliq-cpwv)*(t(:ncol,1:pver)-tfreez))*q(:ncol,1:pver)
+   else
+      ! CAMNOR thermo end
+      hmn_lev(:ncol,1:pver) = cp*t(:ncol,1:pver) + grav*z(:ncol,1:pver) + rl*q(:ncol,1:pver)
+      ! CAMNOR thermo begin
+   end if
+   ! CAMNOR thermo end
    dp_lev(:ncol,1:pver) = pf(:ncol,2:pver+1)-pf(:ncol,1:pver)
    hmn_zdp(:ncol,1:pver) = hmn_lev(:ncol,1:pver)*dp_lev(:ncol,1:pver)
    q_zdp(:ncol,1:pver) = q(:ncol,1:pver)*dp_lev(:ncol,1:pver)
-
 
 ! Mix profile over vertical length scale of 0.5*PBLH.
 
@@ -1016,20 +1313,26 @@ else ! Default method finding level of MSE maximum (nlev sensitive though)
     ! search for this level stops at planetary boundary layer top.
     !
     do k = pver,msg + 1,-1
-       do i = 1,ncol
-          hmn(i) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
-          if (k >= nint(pblt(i)) .and. k <= lon(i) .and. hmn(i) > hmax(i)) then
-             hmax(i) = hmn(i)
-             mx(i) = k
-          end if
-       end do
+      do i = 1,ncol
+         ! CAMNOR thermo begin
+         if (use_moist_plume_thermo) then
+            hmn(i) =(cp+q(i,k)*cpliq)*t(i,k)/(1._kind_phys+q(i,k)) &
+                 +(1._kind_phys+q(i,k)/eps1)/(1._kind_phys+q(i,k))*grav*z(i,k) &
+                 +(rl-(cpliq-cpwv)*(t(i,k)-tfreez))*q(i,k)
+         else
+            ! CAMNOR thermo end
+            hmn(i) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
+        if (k >= nint(pblt(i)) .and. k <= lon(i) .and. hmn(i) > hmax(i)) then
+          hmax(i) = hmn(i)
+          mx(i) = k
+        end if
+      end do
     end do
 
 end if ! Default method of determining parcel launch properties.
-
-
-
-
 
 ! LCL dilute calculation - initialize to mx(i)
 ! Determine lcl in parcel_dilute and get pl,tl after parcel_dilute
@@ -1045,40 +1348,50 @@ if (lparcel_pbl) then
       lcl(i) = mx(i)
       tl(i) = (hpar(i)-rl*qpar(i)-grav*parcel_ztop(i))/cp
       ql(i) = qpar(i)
+      ! CAMNOR thermo begin
+      if (use_moist_plume_thermo) then !tht: not exact but should be good enough
+         tl(i) = (hpar(i)-(rl-(cpliq-cpwv)*(tl(i)-tfreez))*ql(i) &
+              -(1._kind_phys+ql(i)/eps1)/(1._kind_phys+ql(i))*grav*parcel_ztop(i)) &
+              /((cp+qpar(i)*cpliq)/(1._kind_phys+ql(i)))
+      end if
+      ! CAMNOR thermo end
       pl(i) = p(i,mx(i))
+      ! CAMNOR thermo begin
+      zl(i) = parcel_ztop(i)
+      ! CAMNOR thermo end
    end do
 
 else
-
    do i = 1,ncol
       lcl(i) = mx(i)
       tl(i) = t(i,mx(i))
+      ! CAMNOR thermo begin
+      zl(i) = z(i,mx(i))
+      ! CAMNOR thermo end
       ql(i) = q(i,mx(i))
       pl(i) = p(i,mx(i))
    end do
 
 end if ! Mixed parcel properties
 
-
-
 !
-! main buoyancy calculation.
+! dilute plume buoyancy calculation
 !
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!! DILUTE PLUME CALCULATION USING ENTRAINING PLUME !!!
-!!!   RBN 9/9/04   !!!
-
    call parcel_dilute(ncol, pver, cpliq, cpwv, rh2o, latice, msg, mx, p, t, q, &
    tpert, tp, tpv, qstp, pl, tl, ql, lcl, &
-   landfrac, lat, long, errmsg, errflg)
-
+   landfrac, lat, long, errmsg, errflg, &
+   ! CAMNOR thermo begin
+   z, zl, dmpdz &
+   ! CAMNOR thermo end
+   )
 
 ! If lcl is above the nominal level of non-divergence (600 mbs),
 ! no deep convection is permitted (ensuing calculations
 ! skipped and cape retains initialized value of zero).
 !
    do i = 1,ncol
-      plge600(i) = pl(i).ge.600._kind_phys ! Just change to always allow buoy calculation.
+      ! CAMNOR thermo change (600._kind_phys ==> plclmin)
+      plge600(i) = pl(i).ge.plclmin ! Just change to always allow buoy calculation.
    end do
 
 !
@@ -1087,8 +1400,17 @@ end if ! Mixed parcel properties
    do k = pver,msg + 1,-1
       do i=1,ncol
          if (k <= mx(i) .and. plge600(i)) then   ! Define buoy from launch level to cloud top.
-            tv(i,k) = t(i,k)* (1._kind_phys+1.608_kind_phys*q(i,k))/ (1._kind_phys+q(i,k))
-            buoy(i,k) = tpv(i,k) - tv(i,k) + tiedke_add  ! +0.5K or not?
+            ! CAMNOR thermo begin
+            if (camnor_thermo) then
+               tv(i,k) = t(i,k)* (1._kind_phys+q(i,k)/eps1)/ (1._kind_phys+q(i,k))
+               buoy(i,k) = tpv(i,k) - tv(i,k) + (tiedke_add*(1._kind_phys-landfrac(i))+tiedke_lnd*landfrac(i))
+            else
+               ! CAMNOR thermo end
+               tv(i,k) = t(i,k)* (1._kind_phys+1.608_kind_phys*q(i,k))/ (1._kind_phys+q(i,k))
+               buoy(i,k) = tpv(i,k) - tv(i,k) + tiedke_add
+               ! CAMNOR thermo begin
+            end if
+            ! CAMNOR thermo end
          else
             qstp(i,k) = q(i,k)
             tp(i,k)   = t(i,k)
@@ -1097,15 +1419,11 @@ end if ! Mixed parcel properties
       end do
    end do
 
-
-
 !-------------------------------------------------------------------------------
+! Beginning from one below top (first level p>40hPa, msg) check for at most
+! num_cin levels of neutral buoyancy (LELten) and compute CAPEten between LCL
+! and each of them (tht)
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-
-!
    do k = msg + 2,pver
       do i = 1,ncol
          if (k < lcl(i) .and. plge600(i)) then
@@ -1153,7 +1471,11 @@ end subroutine buoyan_dilute
 
 subroutine parcel_dilute (ncol, pver, cpliq, cpwv, rh2o, latice, msg, klaunch, p, t, q, &
   tpert, tp, tpv, qstp, pl, tl, ql, lcl, &
-  landfrac,lat,long,errmsg,errflg)
+  landfrac,lat,long,errmsg,errflg, &
+  ! CAMNOR thermo begin
+  z, zl, dmpdz &
+  ! CAMNOR thermo end
+  )
 
 ! Routine  to determine
 !   1. Tp   - Parcel temperature
@@ -1191,16 +1513,23 @@ integer, intent(inout), dimension(ncol) :: lcl ! Lifting condesation level (firs
 
 real(kind_phys), intent(out), dimension(ncol,pver) :: tpv   ! Define tpv within this routine.
 
+! CAMNOR thermo begin
+real(kind_phys), intent(in),    dimension(ncol,pver) :: z
+real(kind_phys), intent(inout), dimension(ncol)      :: zl ! GPH of LCL.
+real(kind_phys), intent(inout), dimension(ncol,pver) :: dmpdz
+! CAMNOR thermo end
+
 character(len=512), intent(out)      :: errmsg
 integer, intent(out)                 :: errflg
-
-
 
 real(kind_phys), intent(in), dimension(ncol) :: landfrac
 !--------------------
 
 ! Have to be careful as s is also dry static energy.
-
+! CAMNOR thermo begin
+! In the mods below, s is used both as enthalpy (moist s.e.) and entropy
+! Note that the dummy argument, dmpdz replaces a local variable of the same name
+! CAMNOR thermo end
 
 ! If we are to retain the fact that CAM loops over grid-points in the internal
 ! loop then we need to dimension sp,atp,mp,xsh2o with ncol.
@@ -1213,7 +1542,6 @@ real(kind_phys) smix(ncol,pver)        ! Entropy of the entraining parcel.
 real(kind_phys) xsh2o(ncol,pver)       ! Precipitate lost from parcel.
 real(kind_phys) ds_xsh2o(ncol,pver)    ! Entropy change due to loss of condensate.
 real(kind_phys) ds_freeze(ncol,pver)   ! Entropy change sue to freezing of precip.
-real(kind_phys) dmpdz2d(ncol,pver)     ! variable detrainment rate
 
 real(kind_phys) mp(ncol)    ! Parcel mass flux.
 real(kind_phys) qtp(ncol)   ! Parcel total water.
@@ -1225,12 +1553,14 @@ real(kind_phys) mp0(ncol)    ! Parcel launch relative mass flux.
 
 real(kind_phys) lwmax      ! Maximum condesate that can be held in cloud before rainout.
 real(kind_phys) dmpdp      ! Parcel fractional mass entrainment rate (/mb).
-real(kind_phys) dmpdz      ! Parcel fractional mass entrainment rate (/m)
 real(kind_phys) dpdz,dzdp  ! Hydrstatic relation and inverse of.
 real(kind_phys) senv       ! Environmental entropy at each grid point.
 real(kind_phys) qtenv      ! Environmental total water "   "   ".
 real(kind_phys) penv       ! Environmental total pressure "   "   ".
 real(kind_phys) tenv       ! Environmental total temperature "   "   ".
+! CAMNOR thermo begin
+real(kind_phys) zenv       ! Environmental GPH
+! CAMNOR thermo end
 real(kind_phys) new_s      ! Hold value for entropy after condensation/freezing adjustments.
 real(kind_phys) new_q      ! Hold value for total water after condensation/freezing adjustments.
 real(kind_phys) dp         ! Layer thickness (center to center)
@@ -1240,11 +1570,14 @@ real(kind_phys) tscool     ! Super cooled temperature offset (in degC) (eg -35).
 real(kind_phys) qxsk, qxskp1        ! LCL excess water (k, k+1)
 real(kind_phys) dsdp, dqtdp, dqxsdp ! LCL s, qt, p gradients (k, k+1)
 real(kind_phys) slcl,qtlcl,qslcl    ! LCL s, qt, qs values.
-real(kind_phys) dmpdz_lnd, dmpdz_mask
 
 integer rcall       ! Number of ientropy call for errors recording
 integer nit_lheat     ! Number of iterations for condensation/freezing loop.
 integer i,k,ii   ! Loop counters.
+
+! CAMNOR thermo begin
+real(kind_phys) :: est
+! CAMNOR thermo end
 
 !======================================================================
 !    SUMMARY
@@ -1260,8 +1593,10 @@ integer i,k,ii   ! Loop counters.
 !
 
 nit_lheat = 2 ! iterations for ds,dq changes from condensation freezing.
-dmpdz=dmpdz_param       ! Entrainment rate. (-ve for /m)
-dmpdz_lnd=-1.e-3_kind_phys
+! CAMNOR thermo begin
+if (.not. camnor_thermo) dmpdz(:,:) = dmpdz_param       ! Entrainment rate. (-ve for /m)
+! CAMNOR thermo end
+
 lwmax = 1.e-3_kind_phys    ! Need to put formula in for this.
 tscool = 0.0_kind_phys   ! Temp at which water loading freezes in the cloud.
 
@@ -1271,6 +1606,9 @@ smix=0._kind_phys
 qtenv = 0._kind_phys
 senv = 0._kind_phys
 tenv = 0._kind_phys
+! CAMNOR thermo begin
+zenv = 0._kind_phys
+! CAMNOR thermo end
 penv = 0._kind_phys
 
 qtp0 = 0._kind_phys
@@ -1290,80 +1628,123 @@ do k = pver, msg+1, -1
    do i=1,ncol
 
 ! Initialize parcel values at launch level.
-
       if (k == klaunch(i)) then
-
-         if (lparcel_pbl) then ! Modifcations to parcel properties if lparcel_pbl set.
-
-            qtp0(i) = ql(i)     ! Parcel launch q (PBL mixed value).
-            sp0(i)  = entropy(tl(i),pl(i),qtp0(i),cpliq,cpwv,rh2o) ! Parcel launch entropy could be a mixed parcel.
-
-         else
-
-            qtp0(i) = q(i,k)    ! Parcel launch total water (assuming subsaturated)
-            sp0(i)  = entropy(t(i,k),p(i,k),qtp0(i),cpliq,cpwv,rh2o) ! Parcel launch entropy.
-
-         end if
-
-         mp0(i)  = 1._kind_phys       ! Parcel launch relative mass (i.e. 1 parcel stays 1 parcel for dmpdp=0, undilute).
-         smix(i,k)  = sp0(i)
-         qtmix(i,k) = qtp0(i)
-         tfguess = t(i,k)
-         rcall = 1
-         call ientropy (rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,&
-                        lat(i), long(i), errmsg,errflg)
+        if (lparcel_pbl) then ! Modifcations to parcel properties if lparcel_pbl set.
+          qtp0(i) = ql(i)     ! Parcel launch q (PBL mixed value).
+          ! CAMNOR thermo begin
+          if (camnor_thermo) then
+             sp0(i)  = enthalpy(tl(i),pl(i),qtp0(i),zl(i),cpliq,cpwv,rh2o)
+          else
+             ! CAMNOR thermo end
+             sp0(i)  = entropy(tl(i),pl(i),qtp0(i),cpliq,cpwv,rh2o) ! Parcel launch entropy could be a mixed parcel.
+             ! CAMNOR thermo begin
+          end if
+          ! CAMNOR thermo end
+        else
+          qtp0(i) = q(i,k)    ! Parcel launch total water (assuming subsaturated)
+          ! CAMNOR thermo begin
+          if (camnor_thermo) then
+             sp0(i)  = enthalpy(t(i,k),p(i,k),qtp0(i),z(i,k),cpliq,cpwv,rh2o)
+          else
+             ! CAMNOR thermo end
+             sp0(i)  = entropy(t(i,k),p(i,k),qtp0(i),cpliq,cpwv,rh2o) ! Parcel launch entropy.
+             ! CAMNOR thermo begin
+          end if
+          ! CAMNOR thermo end
+        end if
+        mp0(i)  = 1._kind_phys       ! Parcel launch relative mass (i.e. 1 parcel stays 1 parcel for dmpdp=0, undilute).
+        smix(i,k)  = sp0(i)
+        qtmix(i,k) = qtp0(i)
+        ! CAMNOR thermo begin
+        if (camnor_thermo) then
+           if (lparcel_pbl) then
+              tfguess = t(i,k)
+              rcall = 1
+              call ienthalpy(rcall,i,smix(i,k),p(i,k),z(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,&
+                   lat(i), long(i), errmsg,errflg)
+           else
+              ! .not.lparcel_pbl: since the function to invert for T is identical with
+              !                   sp0(i)=entropy(t), the result is t(i,k) (verified 21/2/2014, tht)
+              tmix(i,k) = t(i,k)
+              call qsat_hPa(tmix(i,k),p(i,k), est, qsmix(i,k))
+           end if
+        else
+           ! CAMNOR thermo end
+           tfguess = t(i,k)
+           rcall = 1
+           call ientropy (rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,&
+                          lat(i), long(i), errmsg,errflg)
+        end if
+        ! CAMNOR thermo begin
       end if
+      ! CAMNOR thermo end
 
 ! Entraining levels
 
       if (k < klaunch(i)) then
-
 ! Set environmental values for this level.
-
          dp = (p(i,k)-p(i,k+1)) ! In -ve mb as p decreasing with height - difference between center of layers.
          qtenv = 0.5_kind_phys*(q(i,k)+q(i,k+1))         ! Total water of environment.
          tenv  = 0.5_kind_phys*(t(i,k)+t(i,k+1))
          penv  = 0.5_kind_phys*(p(i,k)+p(i,k+1))
+         ! CAMNOR thermo begin
+         zenv  = 0.5_kind_phys*(z(i,k)+z(i,k+1))
+         ! CAMNOR thermo end
 
-         senv  = entropy(tenv,penv,qtenv,cpliq,cpwv,rh2o)  ! Entropy of environment.
+         ! CAMNOR thermo begin
+         if (camnor_thermo) then
+            senv  = enthalpy(tenv,penv,qtenv,zenv,cpliq,cpwv,rh2o) ! Enthalpy of environment.
+         else
+            ! CAMNOR thermo end
+            senv  = entropy(tenv,penv,qtenv,cpliq,cpwv,rh2o)       ! Entropy of environment.
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
 
 ! Determine fractional entrainment rate /pa given value /m.
-
          dpdz = -(penv*grav)/(rgas*tenv) ! in mb/m since  p in mb.
          dzdp = 1._kind_phys/dpdz                  ! in m/mb
-         dmpdp = dmpdz*dzdp
+         ! CAMNOR thermo note: in original, dmpdz is a scalar
+         dmpdp = dmpdz(i,k) * dzdp
 
 ! Sum entrainment to current level
 ! entrains q,s out of intervening dp layers, in which linear variation is assumed
 ! so really it entrains the mean of the 2 stored values.
-
          sp(i)  = sp(i)  - dmpdp*dp*senv
          qtp(i) = qtp(i) - dmpdp*dp*qtenv
          mp(i)  = mp(i)  - dmpdp*dp
 
 ! Entrain s and qt to next level.
-
          smix(i,k)  = (sp0(i)  +  sp(i)) / (mp0(i) + mp(i))
          qtmix(i,k) = (qtp0(i) + qtp(i)) / (mp0(i) + mp(i))
 
 ! Invert entropy from s and q to determine T and saturation-capped q of mixture.
 ! t(i,k) used as a first guess so that it converges faster.
-
          tfguess = tmix(i,k+1)
          rcall = 2
-         call ientropy(rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,lat(i),&
-                       long(i),errmsg,errflg)
+         ! CAMNOR thermo begin
+         if (camnor_thermo) then
+            call ienthalpy(rcall,i,smix(i,k),p(i,k),z(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,lat(i),&
+                           long(i),errmsg,errflg)
+         else
+            ! CAMNOR thermo end
+            call ientropy(rcall,i,smix(i,k),p(i,k),qtmix(i,k),tmix(i,k),qsmix(i,k),tfguess,cpliq,cpwv,rh2o,lat(i),&
+                          long(i),errmsg,errflg)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
 
-!
 ! Determine if this is lcl of this column if qsmix <= qtmix.
 ! FIRST LEVEL where this happens on ascending.
-
          if (qsmix(i,k) <= qtmix(i,k) .and. qsmix(i,k+1) > qtmix(i,k+1)) then
             lcl(i) = k
             qxsk   = qtmix(i,k) - qsmix(i,k)
             qxskp1 = qtmix(i,k+1) - qsmix(i,k+1)
             dqxsdp = (qxsk - qxskp1)/dp
             pl(i)  = p(i,k+1) - qxskp1/dqxsdp    ! pressure level of actual lcl.
+            ! CAMNOR thermo begin
+            zl(i)  = z(i,k+1) - qxskp1/dqxsdp *dzdp
+            ! CAMNOR thermo end
             dsdp   = (smix(i,k)  - smix(i,k+1))/dp
             dqtdp  = (qtmix(i,k) - qtmix(i,k+1))/dp
             slcl   = smix(i,k+1)  +  dsdp* (pl(i)-p(i,k+1))
@@ -1371,7 +1752,15 @@ do k = pver, msg+1, -1
 
             tfguess = tmix(i,k)
             rcall = 3
-            call ientropy (rcall,i,slcl,pl(i),qtlcl,tl(i),qslcl,tfguess,cpliq,cpwv,rh2o,lat(i), long(i), errmsg,errflg)
+            ! CAMNOR thermo begin
+            if (camnor_thermo) then
+               call ienthalpy(rcall,i,slcl,pl(i),zl(i),qtlcl,tl(i),qslcl,tfguess,cpliq,cpwv,rh2o,lat(i), long(i), errmsg,errflg)
+            else
+               ! CAMNOR thermo end
+               call ientropy (rcall,i,slcl,pl(i),qtlcl,tl(i),qslcl,tfguess,cpliq,cpwv,rh2o,lat(i), long(i), errmsg,errflg)
+               ! CAMNOR thermo begin
+            end if
+            ! CAMNOR thermo end
 
          endif
 !
@@ -1381,30 +1770,9 @@ do k = pver, msg+1, -1
    end do ! Levels loop
 end do ! Columns loop
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!END ENTRAINMENT LOOP!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-!! Could stop now and test with this as it will provide some estimate of buoyancy
-!! without the effects of freezing/condensation taken into account for tmix.
-
-!! So we now have a profile of entropy and total water of the entraining parcel
-!! Varying with height from the launch level klaunch parcel=environment. To the
-!! top allowed level for the existence of convection.
-
-!! Now we have to adjust these values such that the water held in vaopor is < or
-!! = to qsmix. Therefore, we assume that the cloud holds a certain amount of
-!! condensate (lwmax) and the rest is rained out (xsh2o). This, obviously
-!! provides latent heating to the mixed parcel and so this has to be added back
-!! to it. But does this also increase qsmix as well? Also freezing processes
-
-
 xsh2o = 0._kind_phys
 ds_xsh2o = 0._kind_phys
 ds_freeze = 0._kind_phys
-
-!!!!!!!!!!!!!!!!!!!!!!!!!PRECIPITATION/FREEZING LOOP!!!!!!!!!!!!!!!!!!!!!!!!!!
-!! Iterate solution twice for accuracy
-
-
 
 do k = pver, msg+1, -1
    do i=1,ncol
@@ -1417,29 +1785,36 @@ do k = pver, msg+1, -1
 
          tp(i,k)    = tmix(i,k)
          qstp(i,k)  = q(i,k)
-         tpv(i,k)   =  (tp(i,k) + tpert(i)) * (1._kind_phys+1.608_kind_phys*qstp(i,k)) / (1._kind_phys+qstp(i,k))
+         ! CAMNOR thermo begin
+         if (camnor_thermo) then
+            tpv(i,k)   =  (tp(i,k) + tpert(i)) * (1._kind_phys+qstp(i,k)/eps1) / (1._kind_phys+qstp(i,k))
+         else
+            ! CAMNOR thermo end
+            tpv(i,k)   =  (tp(i,k) + tpert(i)) * (1._kind_phys+1.608_kind_phys*qstp(i,k)) / (1._kind_phys+qstp(i,k))
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
 
       end if
 
       if (k < klaunch(i)) then
 
-! Initiaite loop if switch(2) = .T. - RBN:DILUTE - TAKEN OUT BUT COULD BE RETURNED LATER.
+         ! CAMNOR thermo begin
+         if (camnor_thermo) then
+            smix(i,k) = entropy(tmix(i,k),p(i,k),qtmix(i,k),cpliq,cpwv,rh2o) ! make sure to use entropy here
+         end if
+         ! CAMNOR thermo end
 
 ! Iterate nit_lheat times for s,qt changes.
-
          do ii=0,nit_lheat-1
 
 ! Rain (xsh2o) is excess condensate, bar LWMAX (Accumulated loss from qtmix).
-
             xsh2o(i,k) = max (0._kind_phys, qtmix(i,k) - qsmix(i,k) - lwmax)
 
 ! Contribution to ds from precip loss of condensate (Accumulated change from smix).(-ve)
-
             ds_xsh2o(i,k) = ds_xsh2o(i,k+1) - cpliq * log (tmix(i,k)/tfreez) * max(0._kind_phys,(xsh2o(i,k)-xsh2o(i,k+1)))
 !
 ! Entropy of freezing: latice times amount of water involved divided by T.
-!
-
             if (tmix(i,k) <= tfreez+tscool .and. ds_freeze(i,k+1) == 0._kind_phys) then ! One off freezing of condensate.
                ds_freeze(i,k) = (latice/tmix(i,k)) * max(0._kind_phys,qtmix(i,k)-qsmix(i,k)-xsh2o(i,k)) ! Gain of LH
             end if
@@ -1449,15 +1824,12 @@ do k = pver, msg+1, -1
             end if
 
 ! Adjust entropy and accordingly to sum of ds (be careful of signs).
-
             new_s = smix(i,k) + ds_xsh2o(i,k) + ds_freeze(i,k)
 
 ! Adjust liquid water and accordingly to xsh2o.
-
             new_q = qtmix(i,k) - xsh2o(i,k)
 
 ! Invert entropy to get updated Tmix and qsmix of parcel.
-
             tfguess = tmix(i,k)
             rcall =4
             call ientropy (rcall,i,new_s, p(i,k), new_q, tmix(i,k), qsmix(i,k), tfguess,cpliq,cpwv,rh2o,&
@@ -1467,18 +1839,23 @@ do k = pver, msg+1, -1
 
 ! tp  - Parcel temp is temp of mixture.
 ! tpv - Parcel v. temp should be density temp with new_q total water.
-
          tp(i,k)    = tmix(i,k)
 
 ! tpv = tprho in the presence of condensate (i.e. when new_q > qsmix)
-
          if (new_q > qsmix(i,k)) then  ! Super-saturated so condensate present - reduces buoyancy.
             qstp(i,k) = qsmix(i,k)
          else                          ! Just saturated/sub-saturated - no condensate virtual effects.
             qstp(i,k) = new_q
          end if
-
-         tpv(i,k) = (tp(i,k)+tpert(i))* (1._kind_phys+1.608_kind_phys*qstp(i,k)) / (1._kind_phys+ new_q)
+         ! CAMNOR thermo begin
+         if (camnor_thermo) then
+            tpv(i,k) = (tp(i,k)+tpert(i))* (1._kind_phys+qstp(i,k)/eps1) / (1._kind_phys+ new_q)
+         else
+            ! CAMNOR thermo end
+            tpv(i,k) = (tp(i,k)+tpert(i))* (1._kind_phys+1.608_kind_phys*qstp(i,k)) / (1._kind_phys+ new_q)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
 
       end if ! k < klaunch
 
@@ -1636,6 +2013,148 @@ SUBROUTINE ientropy (rcall,icol,s,p,qt,T,qst,Tfg,cpliq,cpwv,rh2o,this_lat,this_l
 
 end SUBROUTINE ientropy
 
+! CAMNOR thermo begin
+!-----------------------------------------------------------------------------------------
+real(kind_phys) function enthalpy(TK,p,qtot,z,cpliq,cpwv,rh2o)
+!-----------------------------------------------------------------------------------------
+!
+! TK(K),p(mb),qtot(kg/kg)
+!
+   real(kind_phys), intent(in) :: p,qtot,TK,z
+   real(kind_phys), intent(in) :: cpliq
+   real(kind_phys), intent(in) :: cpwv
+   real(kind_phys), intent(in) :: rh2o
+
+   real(kind_phys) :: qv,qst,e,est,L
+
+   L = rl - (cpliq - cpwv)*(TK-tfreez)
+
+   call qsat_hPa(TK, p, est, qst)
+   qv = min(qtot,qst)                         ! Partition qtot into vapor part only.
+
+   enthalpy = (cpres + qtot*cpliq)* TK + L*qv + (1._kind_phys+qtot)*grav*z
+
+end function enthalpy
+
+!-----------------------------------------------------------------------------------------
+subroutine ienthalpy (rcall,icol,s,p,z,qt,T,qst,Tfg,cpliq,cpwv,rh2o,this_lat,this_lon,errmsg,errflg)
+   !-----------------------------------------------------------------------------------------
+   !
+   ! p(mb), Tfg/T(K), qt/qv(kg/kg), s(J/kg).
+   ! Inverts enthalpy, pressure and total water qt
+   ! for T and saturated vapor mixing ratio
+   !
+
+   integer,           intent(in)  :: icol, rcall
+   real(kind_phys),   intent(in)  :: s, p, z, Tfg, qt
+   real(kind_phys),   intent(in)  :: cpliq
+   real(kind_phys),   intent(in)  :: cpwv
+   real(kind_phys),   intent(in)  :: rh2o
+
+   real(kind_phys),   intent(in)  :: this_lat
+   real(kind_phys),   intent(in)  :: this_lon
+
+   real(kind_phys),    intent(out) :: qst, T
+   character(len=512), intent(out) :: errmsg
+   integer,            intent(out) :: errflg
+
+   real(kind_phys) :: est
+   real(kind_phys) :: a,b,c,d,ebr,fa,fb,fc,pbr,qbr,rbr,sbr,tol1,xm,tol
+   integer :: i
+
+   logical :: converged
+
+   ! Max number of iteration loops.
+   integer, parameter :: LOOPMAX = 100
+   real(kind_phys), parameter :: EPS = 3.e-8_kind_phys
+
+   converged = .false.
+
+   ! Invert the enthalpy equation -- use Brent's method
+   ! Brent, R. P. Ch. 3-4 in Algorithms for Minimization Without Derivatives. Englewood Cliffs, NJ: Prentice-Hall, 1973.
+
+   T = Tfg                  ! Better first guess based on Tprofile from conv.
+
+   a = Tfg-10    !low bracket
+   b = Tfg+10    !high bracket
+
+   fa = enthalpy(a, p, qt, z, cpliq,cpwv,rh2o) - s
+   fb = enthalpy(b, p, qt, z, cpliq,cpwv,rh2o) - s
+
+   c=b
+   fc=fb
+   tol=0.001_kind_phys
+
+   converge: do i=0, LOOPMAX
+      if ((fb > 0.0_kind_phys .and. fc > 0.0_kind_phys) .or. &
+           (fb < 0.0_kind_phys .and. fc < 0.0_kind_phys)) then
+         c=a
+         fc=fa
+         d=b-a
+         ebr=d
+      end if
+      if (abs(fc) < abs(fb)) then
+         a=b
+         b=c
+         c=a
+         fa=fb
+         fb=fc
+         fc=fa
+      end if
+
+      tol1=2.0_kind_phys*EPS*abs(b)+0.5_kind_phys*tol
+      xm=0.5_kind_phys*(c-b)
+      converged = (abs(xm) <= tol1 .or. fb == 0.0_kind_phys)
+      if (converged) exit converge
+
+      if (abs(ebr) >= tol1 .and. abs(fa) > abs(fb)) then
+         sbr=fb/fa
+         if (a == c) then
+            pbr=2.0_kind_phys*xm*sbr
+            qbr=1.0_kind_phys-sbr
+         else
+            qbr=fa/fc
+            rbr=fb/fc
+            pbr=sbr*(2.0_kind_phys*xm*qbr*(qbr-rbr)-(b-a)*(rbr-1.0_kind_phys))
+            qbr=(qbr-1.0_kind_phys)*(rbr-1.0_kind_phys)*(sbr-1.0_kind_phys)
+         end if
+         if (pbr > 0.0_kind_phys) qbr=-qbr
+         pbr=abs(pbr)
+         if (2.0_kind_phys*pbr  <  min(3.0_kind_phys*xm*qbr-abs(tol1*qbr),abs(ebr*qbr))) then
+            ebr=d
+            d=pbr/qbr
+         else
+            d=xm
+            ebr=d
+         end if
+      else
+         d=xm
+         ebr=d
+      end if
+      a=b
+      fa=fb
+      b=b+merge(d,sign(tol1,xm), abs(d) > tol1 )
+
+      fb = enthalpy(b, p, qt, z, cpliq,cpwv,rh2o) - s
+
+   end do converge
+
+   T = b
+   call qsat_hPa(T, p, est, qst)
+
+   if (.not. converged) then
+      write(errmsg,101) '  ZM_CONV: IENTHALPY. Details: call#,icol= ',rcall,icol, &
+           ' lat: ',this_lat,' lon: ',this_lon, &
+           ' P(mb)= ', p, ' Tfg(K)= ', Tfg, ' qt(g/kg) = ', 1000._kind_phys*qt, &
+           ' qst(g/kg) = ', 1000._kind_phys*qst,', s(J/kg) = ',s
+      errflg=1
+   end if
+
+101 format (A,I4,I4,7(A,F6.2))
+
+end SUBROUTINE ienthalpy
+! CAMNOR thermo end
+
 subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                   latice  ,cpwv    ,rh2o    ,&
                   q       ,t       ,u       ,v       ,p       , &
@@ -1647,12 +2166,11 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                   mx      ,j0      ,jd      ,rl      ,il2g    , &
                   rd      ,grav    ,cp      ,msg     , &
                   evp     ,cu      ,rprd    ,limcnv  ,landfrac, &
-                  qcde     ,qhat  )
-!----------------------------------------------
-! Purpose: Provide cloud properties
-!----------------------------------------------
+                  qcde    ,qhat  )
 
-   implicit none
+!-----------------------------------------------------------------------
+!  Provide cloud properties
+!-----------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
 !
@@ -1695,7 +2213,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! output
 !
-
    real(kind_phys), intent(out) :: rprd(ncol,pver)     ! rate of production of precip at that layer
    real(kind_phys), intent(out) :: du(ncol,pver)       ! detrainement rate of updraft
    real(kind_phys), intent(out) :: ed(ncol,pver)       ! entrainment rate of downdraft
@@ -1742,6 +2259,14 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    real(kind_phys) qds(ncol,pver)
    real(kind_phys) c0mask(ncol)
 
+   ! CAMNOR thermo begin
+   ! For tiedke_lnd
+   real(kind_phys) tiedke_msk(ncol)
+   ! vars for use_moist_plume_thermo
+   ! NB: tu is defined as a scalar in standard ZM
+   real(kind_phys), dimension(ncol,pver) :: mcp, mrd, mrl, tu, td
+   ! CAMNOR thermo end
+
    real(kind_phys) hmin(ncol)
    real(kind_phys) expdif(ncol)
    real(kind_phys) expnum(ncol)
@@ -1757,7 +2282,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    real(kind_phys) totevp(ncol)
    real(kind_phys) alfa(ncol)
    real(kind_phys) ql1
-   real(kind_phys) tu
    real(kind_phys) estu
    real(kind_phys) qstu
 
@@ -1786,12 +2310,20 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 !------------------------------------------------------------------------------
 !
-
-   do i = 1,il2g
+   do i = 1, il2g
       ftemp(i) = 0._kind_phys
       expnum(i) = 0._kind_phys
       expdif(i) = 0._kind_phys
       c0mask(i)  = c0_ocn * (1._kind_phys-landfrac(i)) +   c0_lnd * landfrac(i)
+      ! CAMNOR thermo begin
+      if(camnor_thermo) then
+         tiedke_msk(i) = (tiedke_add * (1._kind_phys-landfrac(i))) + (tiedke_lnd * landfrac(i))
+      else
+         ! CAMNOR thermo end
+         tiedke_msk(i) = tiedke_add
+         ! CAMNOR thermo begin
+      end if
+      ! CAMNOR thermo end
    end do
 !
 !jr Change from msg+1 to 1 to prevent blowup
@@ -1833,23 +2365,45 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          if ( p(i,k)-est(i) <= 0._kind_phys ) then
             qst(i,k) = 1.0_kind_phys
          end if
-
-         gamma(i,k) = qst(i,k)*(1._kind_phys + qst(i,k)/eps1)*eps1*rl/(rd*t(i,k)**2)*rl/cp
-         hmn(i,k) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
-         hsat(i,k) = cp*t(i,k) + grav*z(i,k) + rl*qst(i,k)
+         ! CAMNOR thermo begin (moist thermo)
+         if (camnor_thermo) then
+            mcp(i,k) = (1._kind_phys+cpv*q(i,k))*cp
+            mrl(i,k) = (1._kind_phys-dcol*(t(i,k)-tfreez))*rl
+            mrd(i,k) = (1._kind_phys+zv*q(i,k))*rd
+            gamma(i,k) = qst(i,k)*(1._kind_phys + qst(i,k)/eps1)*eps1*mrl(i,k)/(mrd(i,k)*t(i,k)**2)*mrl(i,k)/mcp(i,k)
+            hmn  (i,k) = mcp(i,k)*t(i,k) + grav*z(i,k) + mrl(i,k)*q(i,k)
+            hsat (i,k) = mcp(i,k)*t(i,k) + grav*z(i,k) + mrl(i,k)*qst(i,k)
+         else
+            ! CAMNOR thermo end
+            gamma(i,k) = qst(i,k)*(1._kind_phys + qst(i,k)/eps1)*eps1*rl/(rd*t(i,k)**2)*rl/cp
+            hmn(i,k) = cp*t(i,k) + grav*z(i,k) + rl*q(i,k)
+            hsat(i,k) = cp*t(i,k) + grav*z(i,k) + rl*qst(i,k)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
          hu(i,k) = hmn(i,k)
          hd(i,k) = hmn(i,k)
          rprd(i,k) = 0._kind_phys
 
          tug(i,k)  = 0._kind_phys
          qcde(i,k)   = 0._kind_phys
-         tvuo(i,k) = (shat(i,k) - grav/cp*zf(i,k))*(1._kind_phys + 0.608_kind_phys*qhat(i,k))
+         ! CAMNOR thermo begin (moist thermo)
+         if(camnor_thermo) then
+            tvuo(i,k) = (shat(i,k) - grav/mcp(i,k)*zf(i,k))*(1._kind_phys+(1._kind_phys/eps1-1._kind_phys)*qhat(i,k))
+         else
+            ! CAMNOR thermo end
+            tvuo(i,k) = (shat(i,k) - grav/cp*zf(i,k))*(1._kind_phys + 0.608_kind_phys*qhat(i,k))
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
          tvu(i,k) = tvuo(i,k)
          frz(i,k)  = 0._kind_phys
-
+         ! CAMNOR thermo begin (moist thermo)
+         td(i,k)  = (hd(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qds(i,k)) &
+                    / (cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qds(i,k) ))
+         ! CAMNOR thermo end
       end do
    end do
-
 !
 !jr Set to zero things which make this routine blow up
 !
@@ -1880,7 +2434,15 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          else
             qsthat(i,k) = qst(i,k)
          end if
-         hsthat(i,k) = cp*shat(i,k) + rl*qsthat(i,k)
+         ! CAMNOR thermo begin (moist thermo)
+         if (camnor_thermo) then
+            hsthat(i,k) = mcp(i,k)*shat(i,k) + mrl(i,k)*qsthat(i,k)
+         else
+            ! CAMNOR thermo end
+            hsthat(i,k) = cp*shat(i,k) + rl*qsthat(i,k)
+            ! CAMNOR thermo begin
+         end if
+         ! CAMNOR thermo end
          if (abs(gamma(i,k-1)-gamma(i,k)) > 1.E-6_kind_phys) then
             gamhat(i,k) = log(gamma(i,k-1)/gamma(i,k))*gamma(i,k-1)*gamma(i,k)/ &
                                 (gamma(i,k-1)-gamma(i,k))
@@ -1927,8 +2489,18 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
    do k = msg + 1,pver
       do i = 1,il2g
          if (k >= jt(i) .and. k <= jb(i)) then
-            hu(i,k) = hmn(i,mx(i)) + cp*tiedke_add
-            su(i,k) = s(i,mx(i)) + tiedke_add
+            ! CAMNOR thermo begin
+            if (camnor_thermo) then
+               ! moist thermo - uniform perturbation either in h or in s
+               hu(i,k) = hmn(i,mx(i)) + mcp(i,k)*tiedke_msk(i)
+               su(i,k) = s(i,mx(i)) + tiedke_msk(i)/(1._kind_phys+cpv*qu(i,k))
+            else
+               ! CAMNOR thermo end
+               hu(i,k) = hmn(i,mx(i)) + cp*tiedke_add
+               su(i,k) = s(i,mx(i)) + tiedke_add
+               ! CAMNOR thermo begin
+            end if
+            ! CAMNOR thermo end
          end if
       end do
    end do
@@ -1989,7 +2561,8 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                      5._kind_phys*i2(i,k)**3+k1(i,k)**2*i4(i,k))/ &
                      k1(i,k)**3*ftemp(i)**4
             f(i,k) = max(f(i,k),0._kind_phys)
-            f(i,k) = min(f(i,k),0.0002_kind_phys)
+            ! CAMNOR thermo note: entrmn replaces 0.0002_kind_phys
+            f(i,k) = min(f(i,k),entrmn) ! maximum entr. rate (lambda_0 in paper)
          end if
       end do
    end do
@@ -2038,7 +2611,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
             mu(i,jb(i)) = 1._kind_phys
             eu(i,jb(i)) = mu(i,jb(i))/dz(i,jb(i))
          end if
-
          tmplel(i) = jt(i)
       end do
       do k = pver,msg + 1,-1
@@ -2123,6 +2695,16 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          end do
       end do
 
+      ! CAMNOR thermo begin (moist thermo, initialize tu)
+      if (camnor_thermo) then
+         do k = pver,msg + 2,-1
+            do i = 1,il2g
+               tu(i,k) = (hu(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qu(i,k)) &
+                    /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qu(i,k) ))
+            end do
+         end do
+      end if
+      ! CAMNOR thermo end
       do i = 1,il2g
          done(i) = .false.
       end do
@@ -2131,15 +2713,34 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          do i = 1,il2g
             if (k == jb(i) .and. eps0(i) > 0._kind_phys) then
                qu(i,k) = q(i,mx(i))
-               su(i,k) = (hu(i,k)-rl*qu(i,k))/cp
+               ! CAMNOR thermo begin (moist thermo)
+               if (camnor_thermo) then
+                  tu(i,k) = (hu(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qu(i,k)) &
+                       /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qu(i,k) ))
+                  su(i,k) = (hu(i,k)-(1._kind_phys-dcol*(tu(i,k)-tfreez))*rl*qu(i,k)) &
+                       /((1._kind_phys+cpv*qu(i,k))*cp)
+               else
+                  ! CAMNOR thermo end
+                  su(i,k) = (hu(i,k)-rl*qu(i,k))/cp
+                  ! CAMNOR thermo begin
+               end if
+               ! CAMNOR thermo end
             end if
             if (( .not. done(i) .and. k > jt(i) .and. k < jb(i)) .and. eps0(i) > 0._kind_phys) then
                su(i,k) = mu(i,k+1)/mu(i,k)*su(i,k+1) + &
                          dz(i,k)/mu(i,k)* (eu(i,k)-du(i,k))*s(i,k)
                qu(i,k) = mu(i,k+1)/mu(i,k)*qu(i,k+1) + dz(i,k)/mu(i,k)* (eu(i,k)*q(i,k)- &
                                du(i,k)*qst(i,k))
-               tu = su(i,k) - grav/cp*zf(i,k)
-               call qsat_hPa(tu, (p(i,k)+p(i,k-1))/2._kind_phys, estu, qstu)
+               ! CAMNOR thermo begin (moist thermo)
+               if (camnor_thermo) then
+                  tu(i,k) = su(i,k) - grav/((1._kind_phys+cpv*qu(i,k))*cp)*zf(i,k)
+               else
+                  ! CAMNOR thermo end
+                  tu(i,k) = su(i,k) - grav/cp*zf(i,k)
+                  ! CAMNOR thermo begin
+               end if
+               ! CAMNOR thermo end
+               call qsat_hPa(tu(i,k), (p(i,k)+p(i,k-1))/2._kind_phys, estu, qstu)
                if (qu(i,k) >= qstu) then
                   jlcl(i) = k
                   kount = kount + 1
@@ -2153,9 +2754,20 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       do k = msg + 2,pver
          do i = 1,il2g
             if ((k > jt(i) .and. k <= jlcl(i)) .and. eps0(i) > 0._kind_phys) then
-               su(i,k) = shat(i,k) + (hu(i,k)-hsthat(i,k))/(cp* (1._kind_phys+gamhat(i,k)))
-               qu(i,k) = qsthat(i,k) + gamhat(i,k)*(hu(i,k)-hsthat(i,k))/ &
-                        (rl* (1._kind_phys+gamhat(i,k)))
+               ! CAMNOR thermo begin (moist thermo)
+               if (camnor_thermo) then
+                  qu(i,k) = qsthat(i,k) + gamhat(i,k)*(hu(i,k)-hsthat(i,k))/ &
+                       ((1._kind_phys-dcol*(tu(i,k)-tfreez))*rl* (1._kind_phys+gamhat(i,k)))
+                  su(i,k) = shat(i,k) + (hu(i,k)-hsthat(i,k))/((1._kind_phys+cpv*qu(i,k))*cp* (1._kind_phys+gamhat(i,k)))
+                  tu(i,k) = su(i,k) - grav/((1._kind_phys+cpv*qu(i,k))*cp)*zf(i,k)
+               else
+                  ! CAMNOR thermo end
+                  su(i,k) = shat(i,k) + (hu(i,k)-hsthat(i,k))/(cp* (1._kind_phys+gamhat(i,k)))
+                  qu(i,k) = qsthat(i,k) + gamhat(i,k)*(hu(i,k)-hsthat(i,k))/ &
+                            (rl* (1._kind_phys+gamhat(i,k)))
+                  ! CAMNOR thermo begin
+               end if
+               ! CAMNOR thermo end
             end if
          end do
       end do
@@ -2166,9 +2778,13 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
       do k = pver,msg + 2,-1
          do i = 1,il2g
              if (k >= jt(i) .and. k < tmplel(i) .and. eps0(i) > 0._kind_phys) then
-
                cu(i,k) = ((mu(i,k)*su(i,k)-mu(i,k+1)*su(i,k+1))/ &
                          dz(i,k)- (eu(i,k)-du(i,k))*s(i,k))/(rl/cp)
+               ! CAMNOR thermo begin
+               if (camnor_thermo) then
+                  cu(i,k) = cu(i,k) * ((1._kind_phys+cpv*qu(i,k))/(1._kind_phys-dcol*(tu(i,k)-tfreez)))
+               end if
+               ! CAMNOR thermo end
                if (k == jt(i)) cu(i,k) = 0._kind_phys
                cu(i,k) = max(0._kind_phys,cu(i,k))
             end if
@@ -2198,8 +2814,6 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
                   totpcp(i) = totpcp(i) + dz(i,k)*(cu(i,k)-du(i,k)*ql(i,k+1))
                   rprd(i,k) = c0mask(i)*mu(i,k)*ql(i,k)
                   qcde(i,k) = ql(i,k)
-
-
                end if
             end do
          end do
@@ -2214,7 +2828,7 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
 !
 ! in normal downdraft strength run alfa=0.2.  In test4 alfa=0.1
 !
-      alfa(i) = 0.1_kind_phys
+      alfa(i) = alfadet ! detrainment proportionality factor (alpha in paper)
       jt(i) = min(jt(i),jb(i)-1)
       jd(i) = max(j0(i),jt(i)+1)
       jd(i) = min(jd(i),jb(i))
@@ -2260,13 +2874,31 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
          if ((k >= jd(i) .and. k <= jb(i)) .and. eps0(i) > 0._kind_phys .and. jd(i) < jb(i)) then
             qds(i,k) = qsthat(i,k) + gamhat(i,k)*(hd(i,k)-hsthat(i,k))/ &
                (rl*(1._kind_phys + gamhat(i,k)))
+            ! CAMNOR thermo begin (moist thermo)
+            if (camnor_thermo) then
+               td(i,k)  = (hd(i,k)-grav*zf(i,k)-(1._kind_phys+dcol*tfreez)*rl*qds(i,k)) &
+                    /(cp*( 1._kind_phys + (cpv-dcol*(rl/cp))*qds(i,k) ))
+               qds(i,k) = qsthat(i,k) + gamhat(i,k)*(hd(i,k)-hsthat(i,k))/ &
+                    ((1._kind_phys-dcol*(td(i,k)-tfreez))*rl*(1._kind_phys + gamhat(i,k)))
+            end if
+            ! CAMNOR thermo end
          end if
       end do
    end do
 
    do i = 1,il2g
       qd(i,jd(i)) = qds(i,jd(i))
-      sd(i,jd(i)) = (hd(i,jd(i)) - rl*qd(i,jd(i)))/cp
+      ! CAMNOR thermo begin (moist thermo)
+      if (camnor_thermo) then
+         k=jd(i)
+         sd(i,k) = (hd(i,k) - (1._kind_phys-dcol*(td(i,k)-tfreez))*rl*qd(i,k))/((1._kind_phys+cpv*qd(i,k))*cp)
+         td(i,k) = sd(i,k) - grav/((1._kind_phys+cpv*qd(i,k))*cp)*zf(i,k)
+      else
+         ! CAMNOR thermo end
+         sd(i,jd(i)) = (hd(i,jd(i)) - rl*qd(i,jd(i)))/cp
+         ! CAMNOR thermo begin
+      end if
+      ! CAMNOR thermo end
    end do
 !
    do k = msg + 2,pver
@@ -2276,7 +2908,16 @@ subroutine cldprp(ncol   ,pver    ,pverp   ,cpliq   , &
             evp(i,k) = -ed(i,k)*q(i,k) + (md(i,k)*qd(i,k)-md(i,k+1)*qd(i,k+1))/dz(i,k)
             evp(i,k) = max(evp(i,k),0._kind_phys)
             mdt = min(md(i,k+1),-small)
-            sd(i,k+1) = ((rl/cp*evp(i,k)-ed(i,k)*s(i,k))*dz(i,k) + md(i,k)*sd(i,k))/mdt
+            ! CAMNOR thermo begin (moist thermo)
+            if (camnor_thermo) then
+               sd(i,k+1) = (((1._kind_phys-dcol*(td(i,k)-tfreez))*rl/((1._kind_phys+cpv*qd(i,k))*cp)*evp(i,k) &
+                    -ed(i,k)*s(i,k))*dz(i,k) + md(i,k)*sd(i,k))/mdt
+            else
+               ! CAMNOR thermo end
+               sd(i,k+1) = ((rl/cp*evp(i,k)-ed(i,k)*s(i,k))*dz(i,k) + md(i,k)*sd(i,k))/mdt
+               ! CAMNOR thermo begin
+            end if
+            ! CAMNOR thermo end
             totevp(i) = totevp(i) - dz(i,k)*ed(i,k)*q(i,k)
          end if
       end do
@@ -2404,6 +3045,7 @@ subroutine closure(ncol   ,pver, &
 
    real(kind_phys) rd
    real(kind_phys) rl
+
 ! change of subcloud layer properties due to convection is
 ! related to cumulus updrafts and downdrafts.
 ! mc(z)=f(z)*mb, mub=betau*mb, mdb=betad*mb are used

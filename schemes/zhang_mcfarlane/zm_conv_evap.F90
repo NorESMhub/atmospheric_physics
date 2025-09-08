@@ -9,7 +9,14 @@ module zm_conv_evap
 !
 ! PUBLIC: interfaces
 !
+  ! CAMNOR thermo begin
+  public zm_conv_evap_init        ! initialize run-time (namelist) flags
+  ! CAMNOR thermo end
   public zm_conv_evap_run         ! evaporation of precip from ZM schemea
+
+  ! CAMNOR thermo begin
+  logical :: camnor_thermo = .false.
+  ! CAMNOR thermo end
 
 contains
 
@@ -100,7 +107,6 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
     integer :: i,k                     ! longitude,level indices
     logical :: old_snow
 
-
 !-----------------------------------------------------------------------
     scheme_name = "zm_conv_evap_run"
     errmsg = ''
@@ -156,17 +162,35 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
         end if
 
 ! relative humidity depression must be > 0 for evaporation
-          evplimit = max(1._kind_phys - q(i,k)/qs(i,k), 0._kind_phys)
-
-          kemask = ke
+        ! CAMNOR thermo begin
+        if (camnor_thermo) then
+           ! Q is a mixing ratio, QS a specific humidity: correcting
+           evplimit = max(1._kind_phys - q(i,k)/(1._kind_phys+q(i,k))/qs(i,k), 0._kind_phys)
+           ! make consistent use of separate KE and KE_LND parameters
+           kemask = ke * (1._kind_phys - landfrac(i)) + ke_lnd * landfrac(i)
+        else
+           ! CAMNOR thermo end
+           evplimit = max(1._kind_phys - q(i,k)/qs(i,k), 0._kind_phys)
+           kemask = ke
+           ! CAMNOR thermo begin
+        end if
+        ! CAMNOR thermo end
 
 ! total evaporation depends on flux in the top of the layer
 ! flux prec is the net production above layer minus evaporation into environmet
-          evpprec(i) = kemask * (1._kind_phys - cldfrc(i,k)) * evplimit * sqrt(flxprec(i,k))
+        evpprec(i) = kemask * (1._kind_phys - cldfrc(i,k)) * evplimit * sqrt(flxprec(i,k))
 
 ! Don't let evaporation supersaturate layer (approx). Layer may already be saturated.
 ! Currently does not include heating/cooling change to qs
-          evplimit   = max(0._kind_phys, (qs(i,k)-q(i,k)) / deltat)
+        ! CAMNOR thermo begin
+        if (camnor_thermo) then
+           evplimit   = max(0._kind_phys, (qs(i,k)-q(i,k)/(1._kind_phys+q(i,k))) / deltat)
+        else
+           ! CAMNOR thermo end
+           evplimit   = max(0._kind_phys, (qs(i,k)-q(i,k)) / deltat)
+           ! CAMNOR thermo begin
+        end if
+        ! CAMNOR thermo end
 
 ! Don't evaporate more than is falling into the layer - do not evaporate rain formed
 ! in this layer but if precip production is negative, remove from the available precip
@@ -243,5 +267,25 @@ subroutine zm_conv_evap_run(ncol, pver, pverp, &
 
   end subroutine zm_conv_evap_run
 
+
+  ! CAMNOR thermo begin
+!===============================================================================
+!> \section arg_table_zm_conv_evap_init Argument Table
+!! \htmlinclude zm_conv_evap_init.html
+!!
+  subroutine zm_conv_evap_init(zmconv_use_moist_plume_thermo, zmconv_retrigger, errmsg, errflg)
+     logical,            intent(in)  :: zmconv_use_moist_plume_thermo
+     logical,            intent(in)  :: zmconv_retrigger
+
+     character(len=512), intent(out) :: errmsg
+     integer,            intent(out) :: errflg
+
+     errmsg = ''
+     errflg = 0
+
+     camnor_thermo = (zmconv_retrigger .or. zmconv_use_moist_plume_thermo)
+
+  end subroutine zm_conv_evap_init
+  ! CAMNOR thermo end
 
 end module zm_conv_evap
