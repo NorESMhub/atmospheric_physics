@@ -108,7 +108,9 @@ contains
     !
     !---------------------------Local workspace-----------------------------
     !
-    integer  :: i,k,m                ! Longitude, level indices
+    integer  :: klev                 ! Level index
+    integer  :: m_cnst               ! Constituent index
+    integer  :: m_thermo             ! Thermodynamic constituent indes
     real(r8) :: fdq(pcols)           ! mass adjustment factor
     real(r8) :: utmp(pcols)          ! temp variable for recalculating the initial u values
     real(r8) :: vtmp(pcols)          ! temp variable for recalculating the initial v values
@@ -119,7 +121,6 @@ contains
     integer  :: vcoord
     real(r8) :: zvirv(pcols,pver)    ! Local zvir array pointer
     real(r8) :: tot_water(pcols  )   ! total water (initial, present)
-    integer  :: m_cnst
     real(r8) :: ps_old(pcols)        ! old surface pressure
     real(r8) :: pdel_new(pcols,pver) ! Layer thickness (pint(k+1) - pint(k))
     real(r8) :: pdot(pcols)          ! total(lagrangian) pressure adjustment
@@ -163,9 +164,9 @@ contains
     vcoord=vc_dycore
     cpm(:ncol,:) = cp_or_cv_dycore(:ncol,:,lchnk)
 
-    do k = 1, pver
-       tp(:ncol,k) = state_t(:ncol,k)  ! TODO - remoe and use state_t instead below
-    enddo
+    do klev = 1, pver
+       tp(:ncol,klev) = state_t(:ncol,klev)  ! TODO - remoe and use state_t instead below
+    end do
 
     call get_conserved_energy(levels_are_moist, &
          1, pver, &
@@ -178,24 +179,24 @@ contains
          vcoord=vcoord, refstate='liq', &
          flatent=latent(:ncol,:), temce=emce(:ncol,:))
 
-    do k = 1, pver
+    do klev = 1, pver
        ! Dp'/Dp
        tot_water(:ncol) = 0.0_r8
        do m_cnst=dry_air_species_num+1,thermodynamic_active_species_num
-          m = thermodynamic_active_species_idx(m_cnst)
-          tot_water(:ncol) = tot_water(:ncol)+state_q(:ncol,k,m)
-       enddo
+          m_thermo = thermodynamic_active_species_idx(m_cnst)
+          tot_water(:ncol) = tot_water(:ncol)+state_q(:ncol,klev,m_thermo)
+       end do
 
        ! new surface pressure
-       state_ps(:ncol) = state_ps(:ncol) + state_pdel(:ncol,k)*(1._r8 + mdq(:ncol,k))
+       state_ps(:ncol) = state_ps(:ncol) + state_pdel(:ncol,klev)*(1._r8 + mdq(:ncol,klev))
 
        ! make all tracers wet
-       do m=1,pcnst
-          if (cnst_type(m).eq.'dry') then
-             state_q(:ncol,k,m) = state_q(:ncol,k,m)*(1._r8-tot_water(:ncol))
+       do m_cnst=1,pcnst
+          if (cnst_type(m) == 'dry') then
+             state_q(:ncol,klev,m_cnst) = state_q(:ncol,klev,m_cnst)*(1._r8-tot_water(:ncol))
           end if
-       enddo
-    enddo
+       end do
+    end do
 
     ! lagrangian & advective pressure change at top interface
     pdot(:ncol) = 0._r8
@@ -204,87 +205,87 @@ contains
 
     ! store old enthalpy integral
     ent_tnd(:ncol)=0._r8
-    do k = 1,pver
-       ent_tnd(:ncol) = ent_tnd(:ncol) - state_pdel(:ncol,k)*state_s(:ncol,k)
-    enddo
+    do klev = 1,pver
+       ent_tnd(:ncol) = ent_tnd(:ncol) - state_pdel(:ncol,klev)*state_s(:ncol,klev)
+    end do
 
     !------------------------------------
     ! start adjustment loop
     !------------------------------------
-    do k = 1, pver
+    do klev = 1, pver
 
        ! new Dp (=:Dp")
-       pdel_new(:ncol,k) = state_pdel(:ncol,k)*(1._r8 + mdq(:ncol,k))
+       pdel_new(:ncol,klev) = state_pdel(:ncol,klev)*(1._r8 + mdq(:ncol,klev))
 
 
        ! compute Dp"/Dp
-       fdq(:ncol) = pdel_new(:ncol,k)/state_pdel(:ncol,k)
+       fdq(:ncol) = pdel_new(:ncol,klev)/state_pdel(:ncol,klev)
 
        ! wind adjustment increments
        uf(:ncol) = 0.
        vf(:ncol) = 0.
 
        ! set utmp and vtmp pre-physics u,v from the updated values and the tendencies
-       utmp(:ncol) = state_u(:ncol,k) - dt * tend_dudt(:ncol,k)
-       vtmp(:ncol) = state_v(:ncol,k) - dt * tend_dvdt(:ncol,k)
+       utmp(:ncol) = state_u(:ncol,klev) - dt * tend_dudt(:ncol,klev)
+       vtmp(:ncol) = state_v(:ncol,klev) - dt * tend_dvdt(:ncol,klev)
 
        ! adjust specific enthalpy
-       te(:ncol,k) = 0._r8
+       te(:ncol,klev) = 0._r8
 
        ! lagrangian pressure change *zi at upper interfac
-       pdzp(:ncol) = pdot(:ncol)*gravit*state_zi(:ncol,k)
+       pdzp(:ncol) = pdot(:ncol)*gravit*state_zi(:ncol,klev)
 
        ! lagrangian pressure change at next interface
        if (hydrostatic) then
-          pdot(:ncol) = pdot(:ncol) + state_pdel(:ncol,k)*mdq(:ncol,k)
+          pdot(:ncol) = pdot(:ncol) + state_pdel(:ncol,klev)*mdq(:ncol,klev)
        end if
 
        ! layer increment = work (~alpha*dp)
-       pdzp(:ncol) = (pdot(:ncol)*gravit*state_zi(:ncol,k+1)-pdzp(:ncol))/pdel_new(:ncol,k)
+       pdzp(:ncol) = (pdot(:ncol)*gravit*state_zi(:ncol,klev+1)-pdzp(:ncol))/pdel_new(:ncol,klev)
 
        ! enthalpy change due to mass loss and to hydrost. pressure work in full adjustment
-       te(:ncol,k) = te(:ncol,k) &
-            + state_s(:ncol,k)/(fdq(:ncol)/(1._r8+mdq(:ncol,k)))  & ! te *(Dp'/Dp")
-            + emce(:ncol,k)*mdq(:ncol,k)/fdq(:ncol)               & ! (phi-phis)*dq*(Dp/Dp")
+       te(:ncol,klev) = te(:ncol,klev) &
+            + state_s(:ncol,klev)/(fdq(:ncol)/(1._r8+mdq(:ncol,klev)))  & ! te *(Dp'/Dp")
+            + emce(:ncol,klev)*mdq(:ncol,klev)/fdq(:ncol)               & ! (phi-phis)*dq*(Dp/Dp")
             - pdzp(:ncol)                                         & ! del(g*zm*dp)
-            + htx_cond(:ncol,k)                                     ! EFLX
+            + htx_cond(:ncol,klev)                                     ! EFLX
 
        ! momentum
-       uf(:ncol) = uf(:ncol) +state_u(:ncol,k)/(fdq(:ncol)/(1._r8+mdq(:ncol,k)))
-       vf(:ncol) = vf(:ncol) +state_v(:ncol,k)/(fdq(:ncol)/(1._r8+mdq(:ncol,k)))
+       uf(:ncol) = uf(:ncol) +state_u(:ncol,klev)/(fdq(:ncol)/(1._r8+mdq(:ncol,klev)))
+       vf(:ncol) = vf(:ncol) +state_v(:ncol,klev)/(fdq(:ncol)/(1._r8+mdq(:ncol,klev)))
 
        ! adjust constituents to conserve mass in each layer
-       do m = 1, pcnst
+       do m_cnst = 1, pcnst
           ! store unadjusted q for use in next k
-          state_q(:ncol,k,m) = state_q(:ncol,k,m) / fdq(:ncol)
+          state_q(:ncol,klev,m_cnst) = state_q(:ncol,klev,m_cnst) / fdq(:ncol)
        end do
 
        ! adjust L-dependent part of local total enthalpy accordingly
-       latent(:ncol,k) = latent(:ncol,k)/fdq(:ncol)
+       latent(:ncol,klev) = latent(:ncol,klev)/fdq(:ncol)
 
        ! adjusted u,v tendencies
-       tend_dudt(:ncol,k) = (uf(:ncol) - utmp(:ncol)) / dt
-       tend_dvdt(:ncol,k) = (vf(:ncol) - vtmp(:ncol)) / dt
+       tend_dudt(:ncol,klev) = (uf(:ncol) - utmp(:ncol)) / dt
+       tend_dvdt(:ncol,klev) = (vf(:ncol) - vtmp(:ncol)) / dt
 
        ! store unadjusted u,v for use in next k
-       utmp(:ncol) = state_u(:ncol,k)
-       vtmp(:ncol) = state_v(:ncol,k)
+       utmp(:ncol) = state_u(:ncol,klev)
+       vtmp(:ncol) = state_v(:ncol,klev)
 
        ! write adjusted u,v
-       state_u(:ncol,k) = uf(:ncol)
-       state_v(:ncol,k) = vf(:ncol)
+       state_u(:ncol,klev) = uf(:ncol)
+       state_v(:ncol,klev) = vf(:ncol)
 
        ! compute new total pressure variables
-       state_pint  (:ncol,k+1) = state_pint(:ncol,k  ) + pdel_new(:ncol,k)
-       state_lnpint(:ncol,k+1) = log(state_pint(:ncol,k+1))
+       state_pint  (:ncol,klev+1) = state_pint(:ncol,klev  ) + pdel_new(:ncol,klev)
+       state_lnpint(:ncol,klev+1) = log(state_pint(:ncol,klev+1))
 
        ! also update pmid for geopotential
-       state_pmid  (:ncol,k) = .5_r8*(state_pint(:ncol,k)+state_pint(:ncol,k+1))
-       state_lnpmid(:ncol,k) = log(state_pmid(:ncol,k  ))
+       state_pmid  (:ncol,klev) = .5_r8*(state_pint(:ncol,klev)+state_pint(:ncol,klev+1))
+       state_lnpmid(:ncol,klev) = log(state_pmid(:ncol,klev  ))
 
-       pdel_rf(:ncol,k)=state_pdel(:ncol,k)/pdel_new(:ncol,k)
-       state_pdel  (:ncol,k  ) = pdel_new(:ncol,k)
-       state_rpdel (:ncol,k  ) = 1._r8/state_pdel(:ncol,k)
+       pdel_rf(:ncol,klev)=state_pdel(:ncol,klev)/pdel_new(:ncol,klev)
+       state_pdel  (:ncol,klev  ) = pdel_new(:ncol,klev)
+       state_rpdel (:ncol,klev  ) = 1._r8/state_pdel(:ncol,klev)
 
     end do
 
@@ -293,31 +294,32 @@ contains
     !------------------------------------
 
     ! make dry tracers dry again
-    do k = 1, pver
+    do klev = 1, pver
        tot_water(:ncol) = 0.0_r8
        do m_cnst=dry_air_species_num+1,thermodynamic_active_species_num
-          m = thermodynamic_active_species_idx(m_cnst)
-          tot_water(:ncol) = tot_water(:ncol)+state_q(:ncol,k,m)
-       enddo
-       do m=1,pcnst
-          if (cnst_type(m).eq.'dry') then
-             state_q(:ncol,k,m) = state_q(:ncol,k,m)/(1._r8-tot_water(:ncol))
+          m_thermo = thermodynamic_active_species_idx(m_cnst)
+          tot_water(:ncol) = tot_water(:ncol)+state_q(:ncol,klev,m_thermo)
+       end do
+       do m_cnst=1,pcnst
+          if (cnst_type(m) == 'dry') then
+             state_q(:ncol,klev,m_cnst) = state_q(:ncol,klev,m_cnst)/(1._r8-tot_water(:ncol))
           end if
-       enddo
-    enddo
+       end do
+    end do
 
     ! call QNEG3 (cf physics_update)
-    do m = 1, pcnst
-       if (m /= ixnumice  .and.  m /= ixnumliq .and. &
-           m /= ixnumrain .and.  m /= ixnumsnow ) then
-          call qneg3('dme_adjust', lchnk, ncol, state_psetcols, pver, m, m, qmin(m:m), state_q(:,1:pver,m:m))
+    do m_cnst = 1, pcnst
+       if (m_cnst /= ixnumice  .and.  m_cnst /= ixnumliq .and. &
+           m_cnst /= ixnumrain .and.  m_cnst /= ixnumsnow ) then
+          call qneg3('dme_adjust', lchnk, ncol, state_psetcols, pver, m_cnst, m_cnst, &
+               qmin(m_cnst:m_cnst), state_q(:,1:pver,m_cnst:m_cnst))
        else
-          do k = 1,pver
-             state_q(:ncol,k,m) = max(1.e-12_r8,state_q(:ncol,k,m))
-             state_q(:ncol,k,m) = min(1.e10_r8,state_q(:ncol,k,m))
+          do klev = 1,pver
+             state_q(:ncol,klev,m_cnst) = max(1.e-12_r8,state_q(:ncol,klev,m_cnst))
+             state_q(:ncol,klev,m_cnst) = min(1.e10_r8,state_q(:ncol,klev,m_cnst))
           end do
        end if
-    enddo
+    end do
 
     call cam_thermo_water_update(state_q(:ncol,:,:), lchnk, ncol, vc_dycore, &
          to_dry_factor=state_pdel(:ncol,:)/state_pdeldry(:ncol,:))
@@ -352,9 +354,9 @@ contains
     state_t(:ncol,:) = tp(:ncol,:)
 
     ! diagnose total internal enthalpy change
-    do k=1,pver
-       ent_tnd(:ncol) = ent_tnd(:ncol) + state_pdel(:ncol,k)*te(:ncol,k)
-    enddo
+    do klev=1,pver
+       ent_tnd(:ncol) = ent_tnd(:ncol) + state_pdel(:ncol,klev)*te(:ncol,klev)
+    end do
     ent_tnd(:ncol) = ent_tnd(:ncol)/dt/gravit
     call geopotential_t  (                                                                    &
          state_lnpint, state_lnpmid, state_pint  , state_pmid  , state_pdel  , state_rpdel  , &
@@ -362,10 +364,10 @@ contains
          state_zi    , state_zm      , ncol         )
 
     ! update original dry static energy
-    do k = 1, pver
-       state_s(:ncol,k) = state_t(:ncol,k  )*cpairv(:ncol,k,lchnk) &
-                        + gravit*state_zm(:ncol,k) + state_phis(:ncol)
-    enddo
+    do klev = 1, pver
+       state_s(:ncol,klev) = state_t(:ncol,klev  )*cpairv(:ncol,klev,lchnk) &
+                        + gravit*state_zm(:ncol,klev) + state_phis(:ncol)
+    end do
 
   contains
 
@@ -426,7 +428,9 @@ contains
 
       !---------------------------Local workspace-----------------------------
 
-      integer  :: i,k,m, ixq              ! Longitude, level indices
+      integer  :: icol,klev, ixq          ! column, level, water vapor indices
+      integer  :: m_cnst                  ! constituent index
+      integer  :: m_thermo                ! thermodynamic constituent index
       integer  :: ierr                    ! error flag
       real(r8) :: fdq   (pcols)           ! mass adjustment factor
       real(r8) :: dcvap(pcols)            ! total column vapour change
@@ -435,7 +439,6 @@ contains
       real(r8) :: dcwat(pcols)            ! total column water  change
       real(r8) :: dcwatr(pcols)           ! residual column water change (in excess of surface flux)
       real(r8) :: tot_water(pcols,2)      ! work array: total water (initial, present)
-      integer  :: m_cnst                  ! index
       real(r8) :: ps_old(pcols)           ! old surface pressure
       real(r8) :: pdel_new(pcols,pver)    ! Layer thickness (pint(k+1) - pint(k))
       real(r8) :: dvap(pcols,pver)        ! wv  mass adjustment
@@ -452,7 +455,7 @@ contains
       real(r8) :: condcp(pcols,pver)      ! species-increment-weighted cp
       real(r8) :: pint_old(pcols,pver+1)  ! work array
       real(r8) :: dummy(pcols,pver)       ! work array
-      integer  :: is_invalid(pcols)
+      logical  :: has_dcwat(pcols)
       !-----------------------------------------------------------------------
 
       ! store old pressure
@@ -482,146 +485,149 @@ contains
       dcwat(:ncol)=0._r8
 
       ! heat associated with cp change
-      do k = 1, pver
+      do klev = 1, pver
          ! mass increments Dp'/Dp
-         tot_water(:ncol,1) = qini(:ncol,k)+liqini(:ncol,k)+iceini(:ncol,k) !initial total  H2O
+         tot_water(:ncol,1) = qini(:ncol,klev)+liqini(:ncol,klev)+iceini(:ncol,klev) !initial total  H2O
          tot_water(:ncol,2) = 0.0_r8
          do m_cnst=dry_air_species_num+1,thermodynamic_active_species_num
-            m = thermodynamic_active_species_idx(m_cnst)
-            tot_water(:ncol,2) = tot_water(:ncol,2)+state_q(:ncol,k,m)
+            m_thermo = thermodynamic_active_species_idx(m_cnst)
+            tot_water(:ncol,2) = tot_water(:ncol,2)+state_q(:ncol,klev,m_thermo)
          end do
-         mdq(:ncol,k)=(tot_water(:ncol,2)-tot_water(:ncol,1))
+         mdq(:ncol,klev)=(tot_water(:ncol,2)-tot_water(:ncol,1))
 
-         dvap(:ncol,k) = state_q(:ncol,k,ixq) - qini(:ncol,k)
-         dliq(:ncol,k) = -liqini(:ncol,k)
+         dvap(:ncol,klev) = state_q(:ncol,klev,ixq) - qini(:ncol,klev)
+         dliq(:ncol,klev) = -liqini(:ncol,klev)
          do m_cnst=1,thermodynamic_active_species_liq_num
-            m = thermodynamic_active_species_liq_idx(m_cnst)
-            dliq(:ncol,k) = dliq(:ncol,k)+state_q(:ncol,k,m)
+            m_thermo = thermodynamic_active_species_liq_idx(m_cnst)
+            dliq(:ncol,klev) = dliq(:ncol,klev)+state_q(:ncol,klev,m_thermo)
          end do
-         dice(:ncol,k) = -iceini(:ncol,k)
+         dice(:ncol,klev) = -iceini(:ncol,klev)
          do m_cnst=1,thermodynamic_active_species_ice_num
-            m = thermodynamic_active_species_ice_idx(m_cnst)
-            dice(:ncol,k) = dice(:ncol,k)+state_q(:ncol,k,m)
+            m_thermo = thermodynamic_active_species_ice_idx(m_cnst)
+            dice(:ncol,klev) = dice(:ncol,klev)+state_q(:ncol,klev,m_thermo)
          end do
 
-         dcvap(:ncol)=dcvap(:ncol)+dvap(:ncol,k)*state_pdel(:ncol,k)/gravit
-         dcliq(:ncol)=dcliq(:ncol)+dliq(:ncol,k)*state_pdel(:ncol,k)/gravit
-         dcice(:ncol)=dcice(:ncol)+dice(:ncol,k)*state_pdel(:ncol,k)/gravit
-         dcwat(:ncol)=dcwat(:ncol)+ mdq(:ncol,k)*state_pdel(:ncol,k)/gravit
+         dcvap(:ncol)=dcvap(:ncol)+dvap(:ncol,klev)*state_pdel(:ncol,klev)/gravit
+         dcliq(:ncol)=dcliq(:ncol)+dliq(:ncol,klev)*state_pdel(:ncol,klev)/gravit
+         dcice(:ncol)=dcice(:ncol)+dice(:ncol,klev)*state_pdel(:ncol,klev)/gravit
+         dcwat(:ncol)=dcwat(:ncol)+ mdq(:ncol,klev)*state_pdel(:ncol,klev)/gravit
       end do
 
-      is_invalid(:ncol)=0
-      where(dcwat(:ncol)*mflx(:ncol) .gt. 0._r8)
-         is_invalid(:ncol) = 1
-      endwhere
+      do icol = 1, ncol
+         if (dcwat(:ncol)*mflx(:ncol) > 0._r8) then
+            has_dcwat(icol) = .true.
+         else
+            has_dcwat(icol) = .false.
+         end if
+      end do
 
       ! local specific enthalpy
-      do k = 1, pver
-         condeps_ref(:ncol,k) = te(:ncol,k) +emce(:ncol,k)
-      enddo
+      do klev = 1, pver
+         condeps_ref(:ncol,klev) = te(:ncol,klev) +emce(:ncol,klev)
+      end do
 
       ! exchange specific enthalpies, incremental
       ! we can partition between source and destination
       dcwatr(:ncol) = 0._r8
-      do k=1,pver
-         mdqr(:ncol,k)=mdq(:ncol,k)+ntrnprd(:ncol,k)+ntsnprd(:ncol,k) ! residual: integrates to vapour change
+      do klev=1,pver
+         mdqr(:ncol,klev)=mdq(:ncol,klev)+ntrnprd(:ncol,klev)+ntsnprd(:ncol,klev) ! residual: integrates to vapour change
 
-         condcp  (:ncol,k) = dvap(:ncol,k)*cpwv + dliq(:ncol,k)*cpliq+dice (:ncol,k)*cpice
-         condepss(:ncol,k) = condcp(:ncol,k)*(state_t(:ncol,k)-t00a) &
-              + (zm(:ncol,k)*gravit + state_phis(:ncol))*mdq (:ncol,k)
-         condepss(:ncol,k) = condepss(:ncol,k)+(cpliq*t00a+h00a)*mdq(:ncol,k)
+         condcp  (:ncol,klev) = dvap(:ncol,klev)*cpwv + dliq(:ncol,klev)*cpliq+dice (:ncol,klev)*cpice
+         condepss(:ncol,klev) = condcp(:ncol,klev)*(state_t(:ncol,klev)-t00a) &
+              + (zm(:ncol,klev)*gravit + state_phis(:ncol))*mdq (:ncol,klev)
+         condepss(:ncol,klev) = condepss(:ncol,klev)+(cpliq*t00a+h00a)*mdq(:ncol,klev)
 
-         condepsf(:ncol,k) =-(cpliq*(tprc(:ncol)-t00a  )+state_phis(:ncol))*ntrnprd(:ncol,k) &
-              -(cpice*(tprc(:ncol)-t00a  )+state_phis(:ncol))*ntsnprd(:ncol,k)
-         condepsf(:ncol,k) = condepsf(:ncol,k)-(ntrnprd(:ncol,k)+ntsnprd(:ncol,k))*(cpliq*t00a+h00a)
-         condepsf(:ncol,k) = condepsf(:ncol,k) &
-              + mdqr(:ncol,k)*(cpwv*(tevp(:ncol)-t00a)+state_phis(:ncol)+(cpliq*t00a+h00a))
+         condepsf(:ncol,klev) =-(cpliq*(tprc(:ncol)-t00a  )+state_phis(:ncol))*ntrnprd(:ncol,klev) &
+              -(cpice*(tprc(:ncol)-t00a  )+state_phis(:ncol))*ntsnprd(:ncol,klev)
+         condepsf(:ncol,klev) = condepsf(:ncol,klev)-(ntrnprd(:ncol,klev)+ntsnprd(:ncol,klev))*(cpliq*t00a+h00a)
+         condepsf(:ncol,klev) = condepsf(:ncol,klev) &
+              + mdqr(:ncol,klev)*(cpwv*(tevp(:ncol)-t00a)+state_phis(:ncol)+(cpliq*t00a+h00a))
 
          ! residual column water change: integrates to surface evaporation
-         dcwatr(:ncol) = dcwatr(:ncol)  + mdqr(:ncol,k)*state_pdel(:ncol,k)/gravit
-      enddo
+         dcwatr(:ncol) = dcwatr(:ncol)  + mdqr(:ncol,klev)*state_pdel(:ncol,klev)/gravit
+      end do
 
       ! partition arbitrarily based on sign match
       ! EFLX_OUT here: work array for part of input EFLX not accounted for by NTSN/RNPR
       eflx_out(:ncol) = eflx(:ncol)*dt
-      do k = 1, pver
-         where(is_invalid(:ncol).eq.0)
-            eflx_out(:ncol) = eflx_out(:ncol) - state_pdel(:ncol,k)/gravit*condepsf(:ncol,k)
+      do klev = 1, pver
+         where(.not. has_dcwat(:ncol))
+            eflx_out(:ncol) = eflx_out(:ncol) - state_pdel(:ncol,klev)/gravit*condepsf(:ncol,klev)
          elsewhere
             eflx_out(:ncol) = 0._r8
          endwhere
-      enddo
+      end do
       dcqm(:ncol)=0._r8
-      do k=1,pver
-         where(mdqr(:ncol,k)*dcwatr(:ncol).gt.0._r8)
-            dcqm(:ncol)=dcqm(:ncol)+mdqr(:ncol,k)*state_pdel(:ncol,k)/gravit
+      do klev=1,pver
+         where(mdqr(:ncol,klev)*dcwatr(:ncol) > 0._r8)
+            dcqm(:ncol)=dcqm(:ncol)+mdqr(:ncol,klev)*state_pdel(:ncol,klev)/gravit
          endwhere
-      enddo
-      where(abs(dcwatr(:ncol)).gt.rtiny)
+      end do
+      where(abs(dcwatr(:ncol)) > rtiny)
          dcqm(:ncol)=dcwatr(:ncol)/dcqm(:ncol)
       elsewhere
          dcqm(:ncol)=0._r8
       endwhere
-      do k=1,pver
-         where(mdqr(:ncol,k)*dcwatr(:ncol).gt.0._r8)
-            condepsf(:ncol,k) = condepsf(:ncol,k)+eflx_out(:ncol)/dcwatr(:ncol)*mdqr(:ncol,k)*dcqm(:ncol)
+      do klev=1,pver
+         where(mdqr(:ncol,klev)*dcwatr(:ncol) > 0._r8)
+            condepsf(:ncol,klev) = condepsf(:ncol,klev)+eflx_out(:ncol)/dcwatr(:ncol)*mdqr(:ncol,klev)*dcqm(:ncol)
          endwhere
-         where(is_invalid(:ncol).eq.1)
-            condepsf(:ncol,k) = 0._r8
+         where(has_dcwat(:ncol))
+            condepsf(:ncol,klev) = 0._r8
          endwhere
-      enddo
+      end do
 
       ! boundary flux of energy due to mass sources (diagnostic)
       mflx_out(:ncol) = 0._r8
-      do k = 1, pver
-         where(is_invalid(:ncol).eq.0)
+      do klev = 1, pver
+         where(.not. has_dcwat(:ncol))
             ! boundary-flux diagnostic associated with water exchanged (column water gained/lost)
-            mflx_out(:ncol) = mflx_out(:ncol) + state_pdel(:ncol,k)/gravit*mdq(:ncol,k)/dt
+            mflx_out(:ncol) = mflx_out(:ncol) + state_pdel(:ncol,klev)/gravit*mdq(:ncol,klev)/dt
          endwhere
-      enddo
+      end do
 
       ! boundary flux of energy due to mass sources (diagnostic)
       eflx_out(:ncol  ) = 0._r8
-      do k = 1, pver
-         where(is_invalid(:ncol).eq.0)
+      do klev = 1, pver
+         where(.not. has_dcwat(:ncol))
             ! boundary-flux diagnostic associated with water exchanged (column water gained/lost)
-            eflx_out(:ncol) = eflx_out(:ncol) + state_pdel(:ncol,k)/gravit*condepsf(:ncol,k)/dt
+            eflx_out(:ncol) = eflx_out(:ncol) + state_pdel(:ncol,klev)/gravit*condepsf(:ncol,klev)/dt
          endwhere
-      enddo
+      end do
 
       ! make local specific enthalpy incremental
-      do k = 1, pver
-         condeps_ref(:ncol,k) = condeps_ref(:ncol,k)*mdq(:ncol,k)
-      enddo
+      do klev = 1, pver
+         condeps_ref(:ncol,klev) = condeps_ref(:ncol,klev)*mdq(:ncol,klev)
+      end do
 
       ! new surface pressure
       state_ps(:ncol) = state_pint(:ncol,1)
-      do k = 1, pver
-         state_ps(:ncol) = state_ps(:ncol) + state_pdel(:ncol,k)*(1._r8 + mdq(:ncol,k))
+      do klev = 1, pver
+         state_ps(:ncol) = state_ps(:ncol) + state_pdel(:ncol,klev)*(1._r8 + mdq(:ncol,klev))
       end do
 
       ! heat exchange with condensates
       htx_cond(:ncol,:) = 0._r8
-      do k = 1, pver
-         do i=1,ncol
+      do klev = 1, pver
+         do icol=1,ncol
             ! diff. between destination enthalpy and LOCAL     enthalpy (or zero) is distributed in column below
-            if (k.eq.1) then
-               condepsf(i,k)=(condepsf(i,k)-condepss(i,k)) &
-                    *state_pdel(i,k)/(state_ps(i)-state_pint(i,k))
+            if (klev == 1) then
+               condepsf(icol,klev)=(condepsf(icol,klev)-condepss(icol,klev)) &
+                    *state_pdel(icol,klev)/(state_ps(i)-state_pint(icol,klev))
             else
-               condepsf(i,k)=(condepsf(i,k)-condepss(i,k)) &
-                    *state_pdel(i,k)/(state_ps(i)-state_pint(i,k))   &
-                    + condepsf(i,k-1)
+               condepsf(icol,klev)=(condepsf(icol,klev)-condepss(icol,klev)) &
+                    *state_pdel(icol,klev)/(state_ps(i)-state_pint(icol,klev))   &
+                    + condepsf(icol,klev-1)
             endif
-            htx_cond(i,k) = condepsf(i,k) &
+            htx_cond(icol,klev) = condepsf(icol,klev) &
                  ! diff. between LOCAL  enthalpy and reference enthalpy is applied locally
-                 +(condepss(i,k)-condeps_ref(i,k))/(1._r8 + mdq(i,k))
-         enddo
+                 +(condepss(icol,klev)-condeps_ref(icol,klev))/(1._r8 + mdq(icol,klev))
+         end do
 
-         pdel_new(:ncol,k) = state_pdel(:ncol,k)*(1._r8 + mdq(:ncol,k))
+         pdel_new(:ncol,klev) = state_pdel(:ncol,klev)*(1._r8 + mdq(:ncol,klev))
 
          ! compute new total pressure variables
-         state_pint(:ncol,k+1) = state_pint(:ncol,k  ) + pdel_new(:ncol,k)
+         state_pint(:ncol,klev+1) = state_pint(:ncol,klev  ) + pdel_new(:ncol,klev)
 
       end do
 
