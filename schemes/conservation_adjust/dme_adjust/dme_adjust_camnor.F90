@@ -383,15 +383,7 @@ contains
       ! atmospheric moisture change
       !
       ! Method
-      !        1. boundary enthalpy flux is *local* total enthalpy (\epsilon dp/g)
-      !        2. same as 1., but with different specific enthalpy of boundary mass exchange,
-      !          CONDEPS, and a matching heat exchange betweeen air and condensated
-      !          = (\epsilon - CONDEPS) dp/g (sign is for a heat source for air).
-      !     Choice 2. is taken with dme_ ohf_adjust=.true. For CONDEPS then the following
-      !     choice is made: CONDEPS = cpcond *ocnfrac *SST + cpcond *(1-ocnfrac) *TS
-      !     cpcond is a parameter representing the heat capacity of the condensate phase.
-      !     The heating rates and enthalpy boundary fluxes are not applied here,
-      !     they are intended to be passed to dme_adjust.
+      !   boundary enthalpy flux is *local* total enthalpy (\epsilon dp/g)
       !
       ! Author: Thomas Toniazzo (17.07.21)
       !
@@ -428,7 +420,7 @@ contains
       real(r8),         intent(in)    :: eflx(pcols)          ! boundary enthalpy flux
       real(r8),         intent(in)    :: mflx(pcols)          ! boundary mass     flux
       real(r8),         intent(out)   :: eflx_out(pcols)      ! diagnostic: boundary enthalpy flux
-      real(r8),         intent(out)   :: mflx_out(pcols)      ! diagnostic: boundary enthalpy flux
+      real(r8),         intent(out)   :: mflx_out(pcols)      ! diagnostic: boundary mass flux
       real(r8),         intent(out)   :: htx_cond(pcols,pver) ! exchange enthalpy increment for dme_adjust
       real(r8),         intent(out)   :: mdq(pcols,pver)      ! total water       increment for dme_adjust
 
