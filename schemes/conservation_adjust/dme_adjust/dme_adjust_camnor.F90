@@ -192,7 +192,7 @@ contains
 
        ! make all tracers wet
        do m_cnst=1,pcnst
-          if (cnst_type(m) == 'dry') then
+          if (cnst_type(m_cnst) == 'dry') then
              state_q(:ncol,klev,m_cnst) = state_q(:ncol,klev,m_cnst)*(1._r8-tot_water(:ncol))
           end if
        end do
@@ -301,7 +301,7 @@ contains
           tot_water(:ncol) = tot_water(:ncol)+state_q(:ncol,klev,m_thermo)
        end do
        do m_cnst=1,pcnst
-          if (cnst_type(m) == 'dry') then
+          if (cnst_type(m_cnst) == 'dry') then
              state_q(:ncol,klev,m_cnst) = state_q(:ncol,klev,m_cnst)/(1._r8-tot_water(:ncol))
           end if
        end do
@@ -514,7 +514,7 @@ contains
       end do
 
       do icol = 1, ncol
-         if (dcwat(:ncol)*mflx(:ncol) > 0._r8) then
+         if (dcwat(icol)*mflx(icol) > 0._r8) then
             has_dcwat(icol) = .true.
          else
             has_dcwat(icol) = .false.
@@ -613,10 +613,10 @@ contains
             ! diff. between destination enthalpy and LOCAL     enthalpy (or zero) is distributed in column below
             if (klev == 1) then
                condepsf(icol,klev)=(condepsf(icol,klev)-condepss(icol,klev)) &
-                    *state_pdel(icol,klev)/(state_ps(i)-state_pint(icol,klev))
+                    *state_pdel(icol,klev)/(state_ps(icol)-state_pint(icol,klev))
             else
                condepsf(icol,klev)=(condepsf(icol,klev)-condepss(icol,klev)) &
-                    *state_pdel(icol,klev)/(state_ps(i)-state_pint(icol,klev))   &
+                    *state_pdel(icol,klev)/(state_ps(icol)-state_pint(icol,klev))   &
                     + condepsf(icol,klev-1)
             endif
             htx_cond(icol,klev) = condepsf(icol,klev) &
